@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Phase 1 fallback secrets file - never committed
+secrets.local.yaml
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/

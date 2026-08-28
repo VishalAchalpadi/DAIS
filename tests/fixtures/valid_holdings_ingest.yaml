@@ -1,0 +1,132 @@
+pipeline_name: holdings_ingest
+description: "Ingests daily fixed-width holdings files into raw/stage/gold"
+owner: "data-eng-team"
+business_process: morning_holdings_recon
+
+execution:
+  stop_after: gold
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: fixed_width
+  location:
+    kind: s3
+    path: "s3://acme-data/holdings/incoming/"
+    file_pattern: "HOLDINGS_{date}.txt"
+
+parser:
+  type: fixed_width
+  columns:
+    - name: account_id
+      start: 1
+      end: 12
+    - name: security_id
+      start: 13
+      end: 24
+    - name: as_of_date
+      start: 25
+      end: 32
+    - name: quantity
+      start: 33
+      end: 47
+    - name: market_value
+      start: 48
+      end: 62
+    - name: currency
+      start: 63
+      end: 65
+
+control_gates:
+  file_size:
+    min_bytes: 1000
+    max_bytes: 50000000
+  row_count:
+    min_rows: 10
+    max_rows: 500000
+  on_fail: quarantine_file
+
+raw:
+  schema: data_in
+  table: holdings_raw
+  ddl_mode: create_if_not_exists
+  column_type: text
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true
+
+quality:
+  integrity_mode: strict
+  rules:
+    - column: account_id
+      checks: [not_null, non_empty]
+    - column: security_id
+      checks: [not_null, non_empty]
+    - column: as_of_date
+      checks: [not_null, valid_date]
+      cast_to: date
+      format: "%Y%m%d"
+    - column: quantity
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 4
+    - column: market_value
+      checks: [not_null, is_numeric]
+      cast_to: decimal
+      precision: 18
+      scale: 2
+    - column: currency
+      checks: [not_null]
+      lookup:
+        type: sql
+        query: >
+          SELECT 1 FROM ref.currencies
+          WHERE currency_code = :value
+        on_fail: quarantine
+  quarantine:
+    location: "s3://acme-data/holdings/quarantine/"
+    alert:
+      channel: log
+      destination: "DQ-alerts@acme.com"
+
+stage:
+  schema: data_in
+  table: holdings_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["account_id", "security_id", "as_of_date"]
+  write_mode: upsert
+  exports:
+    - enabled: false
+      format: parquet
+      target: iceberg
+      catalog: "analytics_catalog"
+      table: "analytics.holdings_stage"
+      location: "s3://acme-data/iceberg-warehouse/holdings_stage/"
+
+gold:
+  schema: core
+  dbt_project: "dbt/"
+  dbt_select: "holdings_gold"
+
+resilience:
+  retry:
+    max_attempts: 5
+    backoff: exponential
+    base_delay_seconds: 2
+    jitter: true
+
+lineage:
+  namespace: "datamesh-prod"
+  job_name: holdings_ingest

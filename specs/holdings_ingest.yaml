@@ -1,0 +1,212 @@
+# =========================================================================
+# Pipeline Spec: holdings_ingest
+#
+# WORKING DRAFT - placeholders marked <<...>> need your input.
+# Schema layout: raw and stage tables both live in data_in
+# (holdings_raw / holdings_stage); gold lives in core.
+# =========================================================================
+
+pipeline_name: holdings_ingest
+description: "Ingests daily fixed-width holdings files into raw/stage/gold"
+owner: "<<team or person responsible>>"
+# Self-documenting tag only - business_processes/morning_holdings_recon.yaml
+# is the actual source of truth for group membership and SLA.
+business_process: morning_holdings_recon
+
+# ------------------------------------------------------------------------
+# Execution control - pipeline can terminate cleanly at any layer.
+# stop_after: raw | stage | gold
+# Stopping early is a normal, complete run - not a partial/failed one.
+# Any layer can ALSO have its own `exports` block (see stage below) for
+# analytics consumption, independent of how far the pipeline runs.
+# ------------------------------------------------------------------------
+execution:
+  stop_after: gold   # <<set to raw or stage if this run shouldn't go further>>
+
+# ------------------------------------------------------------------------
+# Database platform - SINGLE choice for the whole pipeline.
+# raw, stage, and gold all live on this one platform. Choosing snowflake
+# here means raw/stage/gold are all in Snowflake; choosing postgres means
+# all three are in Postgres. No mixing platforms within a pipeline.
+# ------------------------------------------------------------------------
+database:
+  platform: postgres              # postgres | snowflake
+  # This name is resolved via the active SecretsProvider (Vault in prod,
+  # hardcoded_provider in phase 1) - never a raw connection string here.
+  connection: "<<vault secret name, e.g. aurora_postgres_prod>>"
+
+# ------------------------------------------------------------------------
+# Process monitor - SHARED table across all pipelines, not created per-spec.
+# Every step (control_gate, raw, stage, gold) logs a begin/complete row here
+# with row counts. Schema/table name is fixed platform-wide; listed here
+# only for visibility into where this pipeline's runs will be recorded.
+# ------------------------------------------------------------------------
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: fixed_width
+  location:
+    kind: s3
+    path: "s3://<<bucket-name>>/holdings/incoming/"
+    file_pattern: "HOLDINGS_{date}.txt"
+
+# ------------------------------------------------------------------------
+# Fixed-width column layout. start/end are 1-indexed, inclusive.
+# Used to SPLIT the file into fields - no type casting happens here.
+# ------------------------------------------------------------------------
+parser:
+  type: fixed_width
+  columns:
+    - name: account_id
+      start: 1
+      end: 12
+    - name: security_id
+      start: 13
+      end: 24
+    - name: as_of_date
+      start: 25
+      end: 32
+    - name: quantity
+      start: 33
+      end: 47
+    - name: market_value
+      start: 48
+      end: 62
+    - name: currency
+      start: 63
+      end: 65
+
+# ------------------------------------------------------------------------
+# Control gates - pre-flight checks on the WHOLE file, run BEFORE anything
+# lands in raw. Catches partial sends (too small), duplicate/corrupted
+# feeds (too large), or an unexpected row count - independent of whether
+# any individual row would pass field-level DQ. On failure, the file
+# never reaches raw; it's quarantined and alerted like a strict DQ failure.
+# ------------------------------------------------------------------------
+control_gates:
+  file_size:
+    min_bytes: "<<e.g. 1000>>"
+    max_bytes: "<<e.g. 50000000>>"
+  row_count:
+    min_rows: "<<e.g. 10>>"
+    max_rows: "<<e.g. 500000>>"
+  on_fail: quarantine_file   # reuses quality.quarantine location/alert below
+
+# ------------------------------------------------------------------------
+# RAW layer (bronze) - plain Postgres table, untyped, no enforcement.
+# Every field lands as TEXT exactly as parsed. Table is created only if
+# it does not already exist; the pipeline never drops/alters it.
+# ------------------------------------------------------------------------
+raw:
+  schema: data_in
+  table: holdings_raw
+  ddl_mode: create_if_not_exists   # never truncate, drop, or alter
+  column_type: text                # ALL source columns land as text, no casting
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true             # re-running the same file/checksum = no-op
+
+# ------------------------------------------------------------------------
+# Data quality - enforced only on the raw -> stage transition.
+# Supports simple checks AND arbitrary SQL lookups against reference data.
+# ------------------------------------------------------------------------
+quality:
+  integrity_mode: strict   # one bad row quarantines the WHOLE file
+  rules:
+    - column: account_id
+      checks: [not_null, non_empty]
+    - column: security_id
+      checks: [not_null, non_empty]
+    - column: as_of_date
+      checks: [not_null, valid_date]
+      cast_to: date
+      format: "%Y%m%d"
+    - column: quantity
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 4
+    - column: market_value
+      checks: [not_null, is_numeric]
+      cast_to: decimal
+      precision: 18
+      scale: 2
+    - column: currency
+      checks: [not_null]
+      lookup:                      # SQL-based reference check, not a static list
+        type: sql
+        query: >
+          SELECT 1 FROM ref.currencies
+          WHERE currency_code = :value
+        on_fail: quarantine
+    # Example pattern for a country field, if/when one exists on this file:
+    # - column: country
+    #   lookup:
+    #     type: sql
+    #     query: "SELECT 1 FROM ref.countries WHERE country_code = :value"
+    #     on_fail: quarantine
+  quarantine:
+    location: "s3://<<bucket-name>>/holdings/quarantine/"
+    alert:
+      channel: "<<log | webhook | email>>"
+      destination: "<<e.g. slack webhook URL or DQ-alerts@yourorg.com>>"
+
+# ------------------------------------------------------------------------
+# STAGE layer (silver) - typed, validated, conformed.
+# ------------------------------------------------------------------------
+stage:
+  schema: data_in
+  table: holdings_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["account_id", "security_id", "as_of_date"]
+  # write_mode options:
+  #   truncate_load -> wipe table, load current file fresh (no history retained;
+  #                    use for reference/lookup tables, not snapshot data)
+  #   append        -> insert-only, no merge (use for immutable event/log feeds)
+  #   upsert        -> merge on business_key, insert new / update existing
+  #                    (idempotent at row level; default for holdings/benchmarks)
+  write_mode: upsert
+  # Optional: independent output sink for analytics consumption, e.g. Iceberg.
+  # This runs regardless of `execution.stop_after` - even a stage-only run
+  # can still produce this export.
+  exports:
+    - enabled: false            # <<set true if analytics needs this now>>
+      format: parquet
+      target: iceberg
+      catalog: "<<iceberg catalog name>>"
+      table: "<<e.g. analytics.holdings_stage>>"
+      location: "s3://<<bucket-name>>/iceberg-warehouse/holdings_stage/"
+
+# ------------------------------------------------------------------------
+# GOLD layer - dbt handoff. dbt's target profile must point at the SAME
+# platform/connection defined in `database` above (postgres or snowflake) -
+# never a separate warehouse hardcoded independently of that choice.
+# ------------------------------------------------------------------------
+gold:
+  schema: core
+  dbt_project: "dbt/"
+  dbt_select: "holdings_gold"
+
+# ------------------------------------------------------------------------
+# Resilience - applies to all Postgres/S3/API calls in this pipeline
+# ------------------------------------------------------------------------
+resilience:
+  retry:
+    max_attempts: 5
+    backoff: exponential
+    base_delay_seconds: 2
+    jitter: true
+
+# ------------------------------------------------------------------------
+# Lineage
+# ------------------------------------------------------------------------
+lineage:
+  namespace: "<<your org's OpenLineage namespace, e.g. datamesh-prod>>"
+  job_name: holdings_ingest

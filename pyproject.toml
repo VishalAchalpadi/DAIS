@@ -1,0 +1,49 @@
+[project]
+name = "dais"
+version = "0.1.0"
+description = "DAIS - config-driven medallion pipeline framework"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "pandera>=0.19",
+    "tenacity>=8.2",
+    "openlineage-python>=1.13",
+    "dbt-core>=1.7",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "arq>=0.25",
+    "hvac>=2.1",
+    "pyarrow>=15.0",
+    "pyiceberg>=0.6",
+    "duckdb>=0.10",
+    "polars>=0.20",
+    "psycopg2-binary>=2.9",
+    "sqlalchemy>=2.0",
+    "snowflake-connector-python>=3.7",
+    "snowflake-sqlalchemy>=1.5",
+    "boto3>=1.34",
+    "structlog>=24.1",
+]
+
+[project.scripts]
+dais = "dais.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "moto>=5.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
