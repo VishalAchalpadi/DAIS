@@ -1,9 +1,9 @@
 """Test-only Postgres fixture.
 
-Reads local dev credentials from secrets.local.yaml at the repo root.
-This is a stand-in for the real SecretsProvider abstraction (Phase 5) -
-tests don't wait on that; they just need a real connection now to prove
-the Phase 2 connector/DDL/write-mode code actually works.
+Resolves local dev credentials from secrets.local.yaml at the repo root
+via the real HardcodedSecretsProvider (Phase 5) - the same phase-1
+fallback path a pipeline run would use with SECRETS_PROVIDER=hardcoded,
+not a separate test-only reimplementation of secret loading.
 """
 from __future__ import annotations
 
@@ -11,18 +11,21 @@ import uuid
 from pathlib import Path
 
 import pytest
-import yaml
 
 from dais.resilience.connectors.postgres_connector import PostgresConnector
+from dais.secrets.hardcoded_provider import HardcodedSecretsProvider
 
 SECRETS_FILE = Path(__file__).parent.parent / "secrets.local.yaml"
+_secrets_provider = HardcodedSecretsProvider(SECRETS_FILE)
 
 
 def _local_pg_creds() -> dict | None:
     if not SECRETS_FILE.is_file():
         return None
-    data = yaml.safe_load(SECRETS_FILE.read_text(encoding="utf-8"))
-    return data.get("aurora_postgres_prod")
+    try:
+        return _secrets_provider.get_secret("aurora_postgres_prod")
+    except KeyError:
+        return None
 
 
 requires_local_postgres = pytest.mark.skipif(
