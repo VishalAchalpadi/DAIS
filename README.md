@@ -107,6 +107,12 @@ is the one case that *does* need a small code change: add a module under
 
 ## Running a pipeline
 
+No manual database setup is required beyond having Postgres reachable and
+`secrets.local.yaml` in place: the `data_in`, `core`, and `control` schemas
+and their tables (raw, stage, gold, `process_monitor`) are all created
+automatically on first run (`ddl_mode: create_if_not_exists`) and never
+dropped or altered afterward.
+
 **Standalone (CLI):**
 
 ```bash
