@@ -1,14 +1,14 @@
 # =========================================================================
 # Pipeline Spec: holdings_ingest
 #
-# WORKING DRAFT - placeholders marked <<...>> need your input.
+# Reference pipeline - fully filled in, no draft placeholders remaining.
 # Schema layout: raw and stage tables both live in data_in
 # (holdings_raw / holdings_stage); gold lives in core.
 # =========================================================================
 
 pipeline_name: holdings_ingest
 description: "Ingests daily fixed-width holdings files into raw/stage/gold"
-owner: "<<team or person responsible>>"
+owner: "data-eng-team"
 # Self-documenting tag only - business_processes/morning_holdings_recon.yaml
 # is the actual source of truth for group membership and SLA.
 business_process: morning_holdings_recon
@@ -21,7 +21,7 @@ business_process: morning_holdings_recon
 # analytics consumption, independent of how far the pipeline runs.
 # ------------------------------------------------------------------------
 execution:
-  stop_after: gold   # <<set to raw or stage if this run shouldn't go further>>
+  stop_after: gold   # set to raw or stage if this run shouldn't go further
 
 # ------------------------------------------------------------------------
 # Database platform - SINGLE choice for the whole pipeline.
@@ -33,7 +33,7 @@ database:
   platform: postgres              # postgres | snowflake
   # This name is resolved via the active SecretsProvider (Vault in prod,
   # hardcoded_provider in phase 1) - never a raw connection string here.
-  connection: "<<vault secret name, e.g. aurora_postgres_prod>>"
+  connection: "aurora_postgres_prod"
 
 # ------------------------------------------------------------------------
 # Process monitor - SHARED table across all pipelines, not created per-spec.
@@ -50,7 +50,7 @@ source:
   format: fixed_width
   location:
     kind: s3
-    path: "s3://<<bucket-name>>/holdings/incoming/"
+    path: "s3://dais-example-bucket/holdings/incoming/"
     file_pattern: "HOLDINGS_{date}.txt"
 
 # ------------------------------------------------------------------------
@@ -88,11 +88,11 @@ parser:
 # ------------------------------------------------------------------------
 control_gates:
   file_size:
-    min_bytes: "<<e.g. 1000>>"
-    max_bytes: "<<e.g. 50000000>>"
+    min_bytes: 1000
+    max_bytes: 50000000
   row_count:
-    min_rows: "<<e.g. 10>>"
-    max_rows: "<<e.g. 500000>>"
+    min_rows: 10
+    max_rows: 500000
   on_fail: quarantine_file   # reuses quality.quarantine location/alert below
 
 # ------------------------------------------------------------------------
@@ -153,10 +153,10 @@ quality:
     #     query: "SELECT 1 FROM ref.countries WHERE country_code = :value"
     #     on_fail: quarantine
   quarantine:
-    location: "s3://<<bucket-name>>/holdings/quarantine/"
+    location: "s3://dais-example-bucket/holdings/quarantine/"
     alert:
-      channel: "<<log | webhook | email>>"
-      destination: "<<e.g. slack webhook URL or DQ-alerts@yourorg.com>>"
+      channel: log
+      destination: "DQ-alerts@example.com"
 
 # ------------------------------------------------------------------------
 # STAGE layer (silver) - typed, validated, conformed.
@@ -177,12 +177,12 @@ stage:
   # This runs regardless of `execution.stop_after` - even a stage-only run
   # can still produce this export.
   exports:
-    - enabled: false            # <<set true if analytics needs this now>>
+    - enabled: false            # set true if analytics needs this now
       format: parquet
       target: iceberg
-      catalog: "<<iceberg catalog name>>"
-      table: "<<e.g. analytics.holdings_stage>>"
-      location: "s3://<<bucket-name>>/iceberg-warehouse/holdings_stage/"
+      catalog: "dais_analytics_catalog"
+      table: "analytics.holdings_stage"
+      location: "s3://dais-example-bucket/iceberg-warehouse/holdings_stage/"
 
 # ------------------------------------------------------------------------
 # GOLD layer - dbt handoff. dbt's target profile must point at the SAME
@@ -208,5 +208,5 @@ resilience:
 # Lineage
 # ------------------------------------------------------------------------
 lineage:
-  namespace: "<<your org's OpenLineage namespace, e.g. datamesh-prod>>"
+  namespace: "datamesh-prod"
   job_name: holdings_ingest

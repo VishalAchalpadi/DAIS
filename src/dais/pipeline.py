@@ -16,6 +16,7 @@ from dais.medallion.gold import run_gold
 from dais.medallion.silver import land_stage
 from dais.monitoring.process_monitor import ProcessMonitor
 from dais.parsers import get_parser
+from dais.parsers.fixed_width_parser import parse_fixed_width_chunked
 from dais.quality.control_gates import run_control_gates
 from dais.quality.file_validator import (
     enforce_integrity_mode,
@@ -28,6 +29,11 @@ from dais.quality.row_validator import validate_dataframe
 from dais.resilience.connectors.base import DatabaseConnector
 from dais.resilience.connectors.s3_connector import S3Connector, parse_s3_uri
 from dais.spec.models import PipelineSpec
+
+
+# Above this file size, a fixed_width source is parsed as parallel
+# byte-range chunks instead of one pass - see parse_fixed_width_chunked.
+CHUNKED_PARSE_THRESHOLD_BYTES = 5_000_000
 
 
 @dataclass
@@ -95,8 +101,14 @@ def run_pipeline(
     raw_target = f"{spec.raw.schema_}.{spec.raw.table}"
     handle = monitor.begin_step(run_id, spec.pipeline_name, "raw", raw_target)
     emitter.start("raw", run_id, inputs=[file_path], outputs=[raw_target])
-    parser = get_parser(spec.parser.type)
-    parsed_df = parser.parse(raw_bytes, spec.parser)
+    if spec.parser.type == "fixed_width" and len(raw_bytes) > CHUNKED_PARSE_THRESHOLD_BYTES:
+        # Parsed as parallel byte-range chunks, but still landed and
+        # validated as ONE combined batch below - chunks are never
+        # validated independently, even under strict integrity_mode.
+        parsed_df = parse_fixed_width_chunked(raw_bytes, spec.parser)
+    else:
+        parser = get_parser(spec.parser.type)
+        parsed_df = parser.parse(raw_bytes, spec.parser)
     raw_result = land_raw(
         parsed_df, spec, connector, file_name=file_name, file_path=file_path, file_bytes=raw_bytes, batch_id=run_id
     )

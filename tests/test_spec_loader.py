@@ -9,7 +9,8 @@ from dais.spec.models import PipelineSpec
 
 FIXTURES = Path(__file__).parent / "fixtures"
 VALID_SPEC = FIXTURES / "valid_holdings_ingest.yaml"
-DRAFT_SPEC = Path(__file__).parent.parent / "specs" / "holdings_ingest.yaml"
+REFERENCE_SPEC = Path(__file__).parent.parent / "specs" / "holdings_ingest.yaml"
+REFERENCE_SPEC_2 = Path(__file__).parent.parent / "specs" / "benchmark_ingest.yaml"
 
 
 def test_load_valid_spec():
@@ -27,9 +28,16 @@ def test_missing_file_raises():
         load_spec(FIXTURES / "does_not_exist.yaml")
 
 
-def test_draft_spec_with_placeholders_fails_validation():
-    with pytest.raises(SpecLoadError):
-        load_spec(DRAFT_SPEC)
+def test_reference_spec_holdings_ingest_is_valid():
+    spec = load_spec(REFERENCE_SPEC)
+    assert spec.pipeline_name == "holdings_ingest"
+    assert spec.source.format == "fixed_width"
+
+
+def test_reference_spec_benchmark_ingest_is_valid_and_a_different_format():
+    spec = load_spec(REFERENCE_SPEC_2)
+    assert spec.pipeline_name == "benchmark_ingest"
+    assert spec.source.format == "csv"
 
 
 def _load_dict(base_path: Path) -> dict:

@@ -136,3 +136,27 @@ def test_control_gate_failure_quarantines_before_raw(pg_connector, test_schema, 
     assert result.status == "quarantined"
     assert result.layer_reached is None
     assert not pg_connector.table_exists(test_schema, spec.raw.table)
+
+
+def test_large_file_takes_the_chunked_parse_path(pg_connector, test_schema, tmp_path, ref_currencies, monkeypatch):
+    import dais.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "CHUNKED_PARSE_THRESHOLD_BYTES", 100)  # force chunking
+
+    spec = _spec_for_schema(test_schema, stop_after="raw")
+    spec.control_gates.row_count.min_rows = 1
+    spec.control_gates.row_count.max_rows = 10000
+    spec.control_gates.file_size.min_bytes = 1
+    spec.control_gates.file_size.max_bytes = 1_000_000
+
+    lines = [
+        _sample_line(f"ACC{i:02d}", f"SEC{i:02d}", "20260101", "100.0000", "5000.00", "USD")
+        for i in range(50)
+    ]
+    file_path = _write_sample_file(tmp_path, lines)
+
+    result = run_pipeline(spec, file_path=str(file_path), connector=pg_connector)
+
+    assert result.status == "succeeded"
+    count = pg_connector.fetch_all(f'SELECT COUNT(*) FROM "{test_schema}"."{spec.raw.table}"')
+    assert count[0][0] == 50
