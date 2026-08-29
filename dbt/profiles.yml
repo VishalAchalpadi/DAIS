@@ -1,0 +1,18 @@
+# dbt's target platform/connection is resolved from environment variables
+# set by medallion/gold.py at invocation time - always the SAME
+# platform/connection as raw and stage (spec.database), never a
+# separately hardcoded warehouse. Real credential resolution is a
+# SecretsProvider concern (Phase 5); gold.py is the only thing that
+# populates these env vars, scoped to the dbt subprocess it launches.
+dais:
+  target: default
+  outputs:
+    default:
+      type: postgres
+      host: "{{ env_var('DBT_PG_HOST') }}"
+      port: "{{ env_var('DBT_PG_PORT') | int }}"
+      user: "{{ env_var('DBT_PG_USER') }}"
+      password: "{{ env_var('DBT_PG_PASSWORD') }}"
+      dbname: "{{ env_var('DBT_PG_DBNAME') }}"
+      schema: "{{ env_var('DBT_PG_SCHEMA') }}"
+      threads: 1

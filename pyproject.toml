@@ -11,6 +11,7 @@ dependencies = [
     "tenacity>=8.2",
     "openlineage-python>=1.13",
     "dbt-core>=1.7",
+    "dbt-postgres>=1.7",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "arq>=0.25",

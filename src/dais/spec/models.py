@@ -147,6 +147,27 @@ class ControlGatesConfig(StrictModel):
 
 
 # ---------------------------------------------------------------------------
+# exports - optional Parquet-into-Iceberg sink, usable on any layer
+# (raw, stage, gold), independent of `execution.stop_after`.
+# ---------------------------------------------------------------------------
+
+class ExportConfig(StrictModel):
+    enabled: bool = False
+    format: Literal["parquet"] = "parquet"
+    target: Literal["iceberg"] = "iceberg"
+    catalog: str | None = None
+    table: str | None = None
+    location: str | None = None
+
+    @field_validator("catalog", "table", "location")
+    @classmethod
+    def _v_no_placeholder_if_enabled(cls, v: str | None, info) -> str | None:
+        if info.data.get("enabled") and v is not None:
+            return _reject_placeholder(v)
+        return v
+
+
+# ---------------------------------------------------------------------------
 # raw (bronze)
 # ---------------------------------------------------------------------------
 
@@ -157,6 +178,7 @@ class RawConfig(StrictModel):
     column_type: Literal["text"] = "text"
     preserve_metadata: list[str] = Field(default_factory=list)
     checksum_dedup: bool = True
+    exports: list[ExportConfig] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -210,22 +232,6 @@ class QualityConfig(StrictModel):
 # stage (silver)
 # ---------------------------------------------------------------------------
 
-class ExportConfig(StrictModel):
-    enabled: bool = False
-    format: Literal["parquet"] = "parquet"
-    target: Literal["iceberg"] = "iceberg"
-    catalog: str | None = None
-    table: str | None = None
-    location: str | None = None
-
-    @field_validator("catalog", "table", "location")
-    @classmethod
-    def _v_no_placeholder_if_enabled(cls, v: str | None, info) -> str | None:
-        if info.data.get("enabled") and v is not None:
-            return _reject_placeholder(v)
-        return v
-
-
 class StageConfig(StrictModel):
     schema_: str = Field(alias="schema")
     table: str
@@ -245,6 +251,7 @@ class GoldConfig(StrictModel):
     schema_: str = Field(alias="schema")
     dbt_project: str
     dbt_select: str
+    exports: list[ExportConfig] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
