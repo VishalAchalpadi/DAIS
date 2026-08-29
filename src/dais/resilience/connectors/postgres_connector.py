@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, TypeVar
 
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import execute_values
 
 from dais.resilience.connectors.base import ColumnDef, DatabaseConnector
+from dais.resilience.retry_policies import with_retry
+from dais.spec.models import RetryConfig
+
+# Only retry errors that are plausibly transient - a syntax error or
+# constraint violation will never succeed on a later attempt.
+_RETRYABLE_EXCEPTIONS = (psycopg2.OperationalError, psycopg2.InterfaceError)
+
+T = TypeVar("T")
 
 
 class PostgresConnector(DatabaseConnector):
@@ -14,10 +22,24 @@ class PostgresConnector(DatabaseConnector):
     resolving a spec's `database.connection` secret name into these is a
     SecretsProvider concern (Phase 5), not this class's job."""
 
-    def __init__(self, host: str, port: int, dbname: str, user: str, password: str):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        dbname: str,
+        user: str,
+        password: str,
+        retry_cfg: RetryConfig | None = None,
+    ):
         self._conn = psycopg2.connect(
             host=host, port=port, dbname=dbname, user=user, password=password
         )
+        self._retry_cfg = retry_cfg
+
+    def _run(self, fn: Callable[[], T]) -> T:
+        if self._retry_cfg is None:
+            return fn()
+        return with_retry(fn, self._retry_cfg, exceptions=_RETRYABLE_EXCEPTIONS)
 
     def schema_exists(self, schema: str) -> bool:
         row = self.fetch_one(
@@ -27,11 +49,14 @@ class PostgresConnector(DatabaseConnector):
         return row is not None
 
     def create_schema_if_not_exists(self, schema: str) -> None:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
-            )
-        self._conn.commit()
+        def _do():
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+                )
+            self._conn.commit()
+
+        self._run(_do)
 
     def table_exists(self, schema: str, table: str) -> bool:
         row = self.fetch_one(
@@ -68,32 +93,49 @@ class PostgresConnector(DatabaseConnector):
         stmt = sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
             sql.Identifier(schema), sql.Identifier(table), sql.SQL(", ").join(column_sql)
         )
-        with self._conn.cursor() as cur:
-            cur.execute(stmt)
-        self._conn.commit()
+
+        def _do():
+            with self._conn.cursor() as cur:
+                cur.execute(stmt)
+            self._conn.commit()
+
+        self._run(_do)
 
     def execute(self, sql_text: str, params: dict[str, Any] | None = None) -> None:
-        with self._conn.cursor() as cur:
-            cur.execute(sql_text, params)
-        self._conn.commit()
+        def _do():
+            with self._conn.cursor() as cur:
+                cur.execute(sql_text, params)
+            self._conn.commit()
+
+        self._run(_do)
 
     def fetch_all(self, sql_text: str, params: dict[str, Any] | None = None) -> list[tuple]:
-        with self._conn.cursor() as cur:
-            cur.execute(sql_text, params)
-            return cur.fetchall()
+        def _do():
+            with self._conn.cursor() as cur:
+                cur.execute(sql_text, params)
+                return cur.fetchall()
+
+        return self._run(_do)
 
     def fetch_one(self, sql_text: str, params: dict[str, Any] | None = None) -> tuple | None:
-        with self._conn.cursor() as cur:
-            cur.execute(sql_text, params)
-            return cur.fetchone()
+        def _do():
+            with self._conn.cursor() as cur:
+                cur.execute(sql_text, params)
+                return cur.fetchone()
+
+        return self._run(_do)
 
     def value_exists(self, schema: str, table: str, column: str, value: Any) -> bool:
         stmt = sql.SQL("SELECT 1 FROM {}.{} WHERE {} = %(value)s LIMIT 1").format(
             sql.Identifier(schema), sql.Identifier(table), sql.Identifier(column)
         )
-        with self._conn.cursor() as cur:
-            cur.execute(stmt, {"value": value})
-            return cur.fetchone() is not None
+
+        def _do():
+            with self._conn.cursor() as cur:
+                cur.execute(stmt, {"value": value})
+                return cur.fetchone() is not None
+
+        return self._run(_do)
 
     def bulk_insert(
         self, schema: str, table: str, columns: list[str], rows: Iterable[tuple]
@@ -106,9 +148,13 @@ class PostgresConnector(DatabaseConnector):
             sql.Identifier(table),
             sql.SQL(", ").join(sql.Identifier(c) for c in columns),
         )
-        with self._conn.cursor() as cur:
-            execute_values(cur, stmt.as_string(self._conn), rows)
-        self._conn.commit()
+
+        def _do():
+            with self._conn.cursor() as cur:
+                execute_values(cur, stmt.as_string(self._conn), rows)
+            self._conn.commit()
+
+        self._run(_do)
         return len(rows)
 
     def upsert(
@@ -137,19 +183,26 @@ class PostgresConnector(DatabaseConnector):
             sql.SQL(", ").join(sql.Identifier(c) for c in conflict_columns),
             set_clause,
         )
-        with self._conn.cursor() as cur:
-            execute_values(cur, stmt.as_string(self._conn), rows)
-        self._conn.commit()
+
+        def _do():
+            with self._conn.cursor() as cur:
+                execute_values(cur, stmt.as_string(self._conn), rows)
+            self._conn.commit()
+
+        self._run(_do)
         return len(rows)
 
     def truncate(self, schema: str, table: str) -> None:
-        with self._conn.cursor() as cur:
-            cur.execute(
-                sql.SQL("TRUNCATE TABLE {}.{}").format(
-                    sql.Identifier(schema), sql.Identifier(table)
+        def _do():
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("TRUNCATE TABLE {}.{}").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    )
                 )
-            )
-        self._conn.commit()
+            self._conn.commit()
+
+        self._run(_do)
 
     def close(self) -> None:
         self._conn.close()

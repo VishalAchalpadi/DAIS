@@ -50,3 +50,19 @@ def test_schema(pg_connector):
     schema = f"dais_test_{uuid.uuid4().hex[:8]}"
     yield schema
     pg_connector.drop_schema_cascade(schema)
+
+
+@pytest.fixture
+def ref_currencies(pg_connector):
+    """Ensures ref.currencies exists and is seeded - mirrors how this
+    shared reference table would be maintained in a real deployment, so
+    it's created idempotently and left in place, not torn down."""
+    from dais.resilience.connectors.base import ColumnDef
+
+    pg_connector.create_table_if_not_exists(
+        "ref", "currencies", [ColumnDef("currency_code", "TEXT")], unique_columns=["currency_code"]
+    )
+    for code in ("USD", "EUR", "GBP"):
+        if not pg_connector.value_exists("ref", "currencies", "currency_code", code):
+            pg_connector.bulk_insert("ref", "currencies", ["currency_code"], [(code,)])
+    return pg_connector
