@@ -1,0 +1,102 @@
+# =========================================================================
+# Pipeline Spec: benchmark_ingest
+#
+# Second reference spec, deliberately different from holdings_ingest:
+# CSV instead of fixed-width, local source instead of S3, append write
+# mode instead of upsert, stops after stage (no gold/dbt for this one) -
+# proof the framework is genuinely format/config-agnostic, not just
+# built to fit one file shape.
+# =========================================================================
+
+pipeline_name: benchmark_ingest
+description: "Ingests daily CSV benchmark price files into raw/stage"
+owner: "data-eng-team"
+business_process: morning_holdings_recon
+
+execution:
+  stop_after: stage
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: csv
+  location:
+    kind: local
+    path: "./data/benchmark/incoming/"
+    file_pattern: "BENCHMARK_{date}.csv"
+
+parser:
+  type: csv
+  has_header: true
+
+control_gates:
+  file_size:
+    min_bytes: 20
+    max_bytes: 10000000
+  row_count:
+    min_rows: 1
+    max_rows: 100000
+  on_fail: quarantine_file
+
+raw:
+  schema: data_in
+  table: benchmark_raw
+  ddl_mode: create_if_not_exists
+  column_type: text
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true
+
+quality:
+  integrity_mode: row_level
+  rules:
+    - column: benchmark_id
+      checks: [not_null, non_empty]
+    - column: price_date
+      checks: [not_null, valid_date]
+      cast_to: date
+      format: "%Y-%m-%d"
+    - column: price
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 6
+  quarantine:
+    location: "s3://dais-example-bucket/benchmark/quarantine/"
+    alert:
+      channel: log
+      destination: "n/a"
+
+stage:
+  schema: data_in
+  table: benchmark_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["benchmark_id", "price_date"]
+  write_mode: upsert
+
+gold:
+  schema: core
+  dbt_project: "dbt/"
+  dbt_select: "benchmark_gold"
+
+resilience:
+  retry:
+    max_attempts: 3
+    backoff: exponential
+    base_delay_seconds: 1
+    jitter: true
+
+lineage:
+  namespace: "datamesh-prod"
+  job_name: benchmark_ingest

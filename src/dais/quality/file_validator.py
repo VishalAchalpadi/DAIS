@@ -69,6 +69,26 @@ def write_quarantine(
     return f"s3://{bucket}/{key}"
 
 
+def write_raw_file_quarantine(
+    raw_bytes: bytes, quality_cfg: QualityConfig, file_name: str, s3: S3Connector
+) -> str:
+    """Control-gate failures happen before anything is parsed - quarantine
+    the original file bytes, not row data."""
+    bucket, prefix = parse_s3_uri(quality_cfg.quarantine.location)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    key = f"{prefix.rstrip('/')}/{file_name}.{timestamp}.quarantine"
+    s3.put_object(bucket, key, raw_bytes)
+    return f"s3://{bucket}/{key}"
+
+
+def raise_control_gate_alert(failures: list[str], quality_cfg: QualityConfig, file_name: str) -> None:
+    if not failures:
+        return
+    alerter = get_alerter(quality_cfg.quarantine.alert.channel)
+    message = f"{file_name}: file quarantined at control gate - {'; '.join(failures)}"
+    alerter.send(quality_cfg.quarantine.alert.destination, message, {"file_name": file_name, "failures": failures})
+
+
 def raise_alert(outcome: FileValidationOutcome, quality_cfg: QualityConfig, file_name: str) -> None:
     if not outcome.quarantined_rows:
         return

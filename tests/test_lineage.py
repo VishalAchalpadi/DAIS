@@ -80,6 +80,13 @@ def test_build_emitter_from_spec_uses_lineage_config():
     assert transport.events[0].job.name == "holdings_ingest.raw"
 
 
+def test_build_client_defaults_to_console_transport_when_no_url_configured(monkeypatch):
+    monkeypatch.delenv("OPENLINEAGE_URL", raising=False)
+    client = build_client()  # must not raise - this is the no-config default path
+    emitter = LineageEmitter("ns", "job", client)
+    emitter.start("raw", _run_id())  # must not raise either
+
+
 def test_build_client_uses_provided_transport_without_network_call():
     transport = RecordingTransport()
     client = build_client(transport)

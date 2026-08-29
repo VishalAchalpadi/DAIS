@@ -1,3 +1,5 @@
+import pytest
+
 from dais.resilience.connectors.base import ColumnDef
 from tests.conftest import requires_local_postgres
 
@@ -57,3 +59,15 @@ def test_truncate_clears_rows_but_keeps_table(pg_connector, test_schema):
 
     assert pg_connector.table_exists(test_schema, "widgets")
     assert pg_connector.fetch_all(f'SELECT id FROM "{test_schema}"."widgets"') == []
+
+
+def test_failed_query_rolls_back_so_the_connection_stays_usable(pg_connector, test_schema):
+    import psycopg2
+
+    with pytest.raises(psycopg2.errors.UndefinedTable):
+        pg_connector.fetch_one(f'SELECT 1 FROM "{test_schema}"."does_not_exist"')
+
+    # Without a rollback, the transaction stays aborted and this next,
+    # perfectly valid call would fail with "current transaction is aborted".
+    pg_connector.create_schema_if_not_exists(test_schema)
+    assert pg_connector.schema_exists(test_schema)

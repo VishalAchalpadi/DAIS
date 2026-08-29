@@ -37,9 +37,20 @@ class PostgresConnector(DatabaseConnector):
         self._retry_cfg = retry_cfg
 
     def _run(self, fn: Callable[[], T]) -> T:
+        def _fn_with_rollback_on_error() -> T:
+            try:
+                return fn()
+            except Exception:
+                # A failed statement poisons the transaction until rolled
+                # back - without this, every later call on this connection
+                # (including a retry of this same call) would fail with
+                # "current transaction is aborted", masking the real error.
+                self._conn.rollback()
+                raise
+
         if self._retry_cfg is None:
-            return fn()
-        return with_retry(fn, self._retry_cfg, exceptions=_RETRYABLE_EXCEPTIONS)
+            return _fn_with_rollback_on_error()
+        return with_retry(_fn_with_rollback_on_error, self._retry_cfg, exceptions=_RETRYABLE_EXCEPTIONS)
 
     def schema_exists(self, schema: str) -> bool:
         row = self.fetch_one(

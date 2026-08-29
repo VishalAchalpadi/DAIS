@@ -1,0 +1,21 @@
+# =========================================================================
+# Business process: morning_holdings_recon
+#
+# Single source of truth for which pipelines belong to this SLA-bound
+# group and what "success" means for each - individual pipeline specs
+# may tag themselves with business_process: morning_holdings_recon for
+# self-documentation, but this file (queried against
+# control.process_monitor) is authoritative, not the tag.
+# =========================================================================
+
+process_name: morning_holdings_recon
+
+members:
+  - pipeline_name: holdings_ingest
+    success_layer: gold
+  - pipeline_name: benchmark_ingest
+    success_layer: stage
+
+sla:
+  complete_by: "07:00"
+  timezone: "America/New_York"

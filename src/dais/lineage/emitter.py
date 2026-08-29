@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from openlineage.client import OpenLineageClient
 from openlineage.client.run import Dataset, Job, Run, RunEvent, RunState
-from openlineage.client.transport.console import ConsoleTransport
+from openlineage.client.transport.console import ConsoleConfig, ConsoleTransport
 from openlineage.client.transport.transport import Transport
 
 from dais.spec.models import PipelineSpec
@@ -57,7 +57,7 @@ def build_client(transport: Transport | None = None) -> OpenLineageClient:
     url = os.environ.get("OPENLINEAGE_URL")
     if url:
         return OpenLineageClient(url=url)
-    return OpenLineageClient(transport=ConsoleTransport())
+    return OpenLineageClient(transport=ConsoleTransport(ConsoleConfig()))
 
 
 def build_emitter(spec: PipelineSpec, transport: Transport | None = None) -> LineageEmitter:
