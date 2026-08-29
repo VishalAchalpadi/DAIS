@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _PLACEHOLDER_RE = re.compile(r"^<<.*>>$")
 
@@ -194,18 +194,69 @@ class SqlLookup(StrictModel):
 
 
 # A check is either a bare name ("not_null") or a single-key parameterized
-# check ({"greater_than_or_equal": 0}).
+# check ({"greater_than_or_equal": 0}). Single source of truth for both
+# spec validation (here) and the DQ engine (quality/schema_registry.py) -
+# import from here rather than duplicating the name lists.
 CheckItem = Union[str, dict[str, Any]]
+
+BARE_CHECK_NAMES = {"not_null", "non_empty", "valid_date", "is_numeric"}
+COMPARISON_CHECK_OPS = {
+    "greater_than_or_equal",
+    "greater_than",
+    "less_than_or_equal",
+    "less_than",
+}
 
 
 class QualityRule(StrictModel):
     column: str
     checks: list[CheckItem] = Field(default_factory=list)
-    cast_to: str | None = None
+    cast_to: Literal["date", "decimal"] | None = None
     precision: int | None = None
     scale: int | None = None
     format: str | None = None
     lookup: SqlLookup | None = None
+
+    @field_validator("checks")
+    @classmethod
+    def _validate_check_items(cls, checks: list[CheckItem], info) -> list[CheckItem]:
+        column = info.data.get("column", "<unknown>")
+        for item in checks:
+            if isinstance(item, str):
+                if item not in BARE_CHECK_NAMES:
+                    raise ValueError(
+                        f"column {column!r}: unknown check {item!r}; "
+                        f"must be one of {sorted(BARE_CHECK_NAMES)}"
+                    )
+            elif isinstance(item, dict):
+                if len(item) != 1:
+                    raise ValueError(
+                        f"column {column!r}: a parameterized check must have exactly one "
+                        f"key, got {item!r}"
+                    )
+                (op, value), = item.items()
+                if op not in COMPARISON_CHECK_OPS:
+                    raise ValueError(
+                        f"column {column!r}: unknown comparison check {op!r}; "
+                        f"must be one of {sorted(COMPARISON_CHECK_OPS)}"
+                    )
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise ValueError(
+                        f"column {column!r}: check {op!r} needs a numeric value, got {value!r}"
+                    )
+            else:
+                raise ValueError(f"column {column!r}: unsupported check item {item!r}")
+        return checks
+
+    @model_validator(mode="after")
+    def _valid_date_requires_format(self) -> "QualityRule":
+        # A field_validator on `format` alone wouldn't catch this: pydantic
+        # v2 skips validators on unset/default values, and `format` is
+        # optional with a None default - a model-level check runs
+        # regardless of whether the caller supplied it.
+        if "valid_date" in self.checks and not self.format:
+            raise ValueError(f"column {self.column!r}: `format` is required when `valid_date` is used")
+        return self
 
 
 class AlertConfig(StrictModel):

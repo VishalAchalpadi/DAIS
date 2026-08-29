@@ -114,3 +114,56 @@ def test_fixed_width_missing_columns_rejected():
     data["parser"]["columns"] = []
     with pytest.raises(ValidationError, match="columns"):
         PipelineSpec.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# quality.rules[].checks - validated at spec-load time, not pipeline-run time
+# ---------------------------------------------------------------------------
+
+def test_unknown_bare_check_name_rejected_at_load_time():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["rules"][0]["checks"] = ["not_a_real_check"]
+    with pytest.raises(ValidationError, match="unknown check"):
+        PipelineSpec.model_validate(data)
+
+
+def test_unknown_comparison_check_op_rejected():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["rules"][0]["checks"] = [{"totally_bogus": 5}]
+    with pytest.raises(ValidationError, match="unknown comparison check"):
+        PipelineSpec.model_validate(data)
+
+
+def test_comparison_check_with_multiple_keys_rejected():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["rules"][0]["checks"] = [{"greater_than": 1, "less_than": 2}]
+    with pytest.raises(ValidationError, match="exactly one"):
+        PipelineSpec.model_validate(data)
+
+
+def test_comparison_check_with_non_numeric_value_rejected():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["rules"][0]["checks"] = [{"greater_than_or_equal": "not_a_number"}]
+    with pytest.raises(ValidationError, match="numeric value"):
+        PipelineSpec.model_validate(data)
+
+
+def test_valid_date_without_format_rejected():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["rules"][2]["checks"] = ["not_null", "valid_date"]
+    del data["quality"]["rules"][2]["format"]
+    with pytest.raises(ValidationError, match="format.*required"):
+        PipelineSpec.model_validate(data)
+
+
+def test_valid_date_with_format_accepted():
+    data = _load_dict(VALID_SPEC)
+    spec = PipelineSpec.model_validate(data)
+    assert spec.quality.rules[2].format == "%Y%m%d"
+
+
+def test_unknown_cast_to_rejected():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["rules"][3]["cast_to"] = "integer"  # only date/decimal are implemented
+    with pytest.raises(ValidationError):
+        PipelineSpec.model_validate(data)
