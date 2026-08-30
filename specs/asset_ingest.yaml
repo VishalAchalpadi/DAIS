@@ -123,7 +123,8 @@ quality:
       precision: 18
       scale: 2
   quarantine:
-    location: "s3://dais-example-bucket/assets/quarantine/"
+    kind: local
+    location: "./data/assets/quarantine/"
     alert:
       channel: log
       destination: "DQ-alerts@example.com"

@@ -83,10 +83,8 @@ def run_pipeline(
     if not gate_result.passed:
         monitor.quarantine_step(handle, row_count_in=gate_result.row_count, row_count_out=0)
         emitter.fail("control_gate", run_id)
-        quarantine_location = None
-        if s3 is not None:
-            raise_control_gate_alert(gate_result.failures, spec.quality, file_name)
-            quarantine_location = write_raw_file_quarantine(raw_bytes, spec.quality, file_name, s3)
+        raise_control_gate_alert(gate_result.failures, spec.quality, file_name)
+        quarantine_location = write_raw_file_quarantine(raw_bytes, spec.quality, file_name, s3)
         return PipelineRunResult(
             run_id=run_id,
             status="quarantined",
@@ -129,7 +127,7 @@ def run_pipeline(
     outcome = enforce_integrity_mode(validation, spec.quality)
 
     quarantine_location = None
-    if s3 is not None and outcome.quarantined_rows:
+    if outcome.quarantined_rows:
         raise_alert(outcome, spec.quality, file_name)
         quarantine_location = write_quarantine(outcome.quarantined_rows, spec.quality, file_name, s3)
 

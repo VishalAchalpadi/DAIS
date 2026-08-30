@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
 
+import boto3
 import pytest
 import yaml
+from moto import mock_aws
 
 from dais import cli
 from tests.conftest import requires_local_postgres
@@ -62,7 +64,13 @@ def test_cli_run_succeeds_and_exits_zero(pg_connector, test_schema, tmp_path, ca
     assert "layer_reached=raw" in out
 
 
+@mock_aws
 def test_cli_run_quarantined_exits_nonzero(pg_connector, test_schema, tmp_path, capsys):
+    # A quarantined run now really writes to S3 (cli.py wires an
+    # S3Connector into run_pipeline) - moto stands in for AWS so this
+    # doesn't need real credentials/a real bucket.
+    boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="acme-data")
+
     spec_path = _write_spec(tmp_path, test_schema, min_rows=100)  # our 1-row file will fail this
     file_path = tmp_path / "HOLDINGS_20260101.txt"
     file_path.write_text(_sample_line("ACC01", "SEC01", "20260101", "100.0000", "5000.00", "USD") + "\n", encoding="utf-8")

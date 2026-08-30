@@ -200,6 +200,15 @@ This isn't optional or separately configured - it always runs when
 fail at the database with `ON CONFLICT DO UPDATE command cannot affect
 row a second time` if a file ever contained the same key twice.
 
+### `quality.quarantine.kind`
+
+| Value | Behavior |
+|---|---|
+| `s3` (default) | `location` must be an `s3://...` URI. Requires an `S3Connector` to be passed into `run_pipeline` - the CLI and API both wire one up automatically via `db.build_s3_connector_for_spec`, using boto3's normal credential chain (env vars/IAM role/`~/.aws`), never credentials in the spec. |
+| `local` | `location` is a local filesystem path (e.g. `./data/assets/quarantine/`) - created automatically if it doesn't exist. No AWS account, credentials, or `S3Connector` needed at all. Good for local development and pipelines that will never run anywhere `s3://` access makes sense. |
+
+`location`'s shape is validated against `kind` at spec-load time - an `s3://` URI with `kind: local`, or a local path with `kind: s3` (or the default), both fail to load rather than failing at run time.
+
 ### `quality.quarantine.alert.channel`
 
 | Value | Behavior |

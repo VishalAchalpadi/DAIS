@@ -167,3 +167,36 @@ def test_unknown_cast_to_rejected():
     data["quality"]["rules"][3]["cast_to"] = "integer"  # only date/decimal are implemented
     with pytest.raises(ValidationError):
         PipelineSpec.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# quality.quarantine.kind - local | s3, validated against location's shape
+# ---------------------------------------------------------------------------
+
+def test_quarantine_kind_defaults_to_s3():
+    data = _load_dict(VALID_SPEC)
+    spec = PipelineSpec.model_validate(data)
+    assert spec.quality.quarantine.kind == "s3"
+
+
+def test_quarantine_kind_s3_requires_s3_uri():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["quarantine"]["location"] = "./data/holdings/quarantine/"
+    with pytest.raises(ValidationError, match="s3://"):
+        PipelineSpec.model_validate(data)
+
+
+def test_quarantine_kind_local_rejects_s3_uri():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["quarantine"]["kind"] = "local"
+    # location is still the fixture's s3:// URI - must be rejected
+    with pytest.raises(ValidationError, match="local path"):
+        PipelineSpec.model_validate(data)
+
+
+def test_quarantine_kind_local_with_local_path_accepted():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["quarantine"]["kind"] = "local"
+    data["quality"]["quarantine"]["location"] = "./data/holdings/quarantine/"
+    spec = PipelineSpec.model_validate(data)
+    assert spec.quality.quarantine.kind == "local"

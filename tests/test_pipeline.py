@@ -126,6 +126,9 @@ def test_control_gate_failure_quarantines_before_raw(pg_connector, test_schema, 
     spec.control_gates.row_count.max_rows = 1000
     spec.control_gates.file_size.min_bytes = 1
     spec.control_gates.file_size.max_bytes = 100_000
+    # local quarantine - no AWS account/S3Connector needed for this test
+    spec.quality.quarantine.kind = "local"
+    spec.quality.quarantine.location = str(tmp_path / "quarantine")
 
     file_path = _write_sample_file(
         tmp_path, [_sample_line("ACC01", "SEC01", "20260101", "100.0000", "5000.00", "USD")]
@@ -136,6 +139,8 @@ def test_control_gate_failure_quarantines_before_raw(pg_connector, test_schema, 
     assert result.status == "quarantined"
     assert result.layer_reached is None
     assert not pg_connector.table_exists(test_schema, spec.raw.table)
+    assert result.quarantine_location is not None
+    assert Path(result.quarantine_location).is_file()
 
 
 def test_large_file_takes_the_chunked_parse_path(pg_connector, test_schema, tmp_path, ref_currencies, monkeypatch):

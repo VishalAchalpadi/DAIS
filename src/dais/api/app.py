@@ -18,10 +18,10 @@ from dais.api.models import (
     RunStatusResponse,
 )
 from dais.api.runs import RunRegistry
-from dais.api.worker import ConnectorFactory, execute_pipeline_background
+from dais.api.worker import ConnectorFactory, S3Factory, execute_pipeline_background
 from dais.business_process.evaluator import evaluate_business_process
 from dais.business_process.loader import BusinessProcessLoadError, load_business_process
-from dais.db import build_connector_for_spec
+from dais.db import build_connector_for_spec, build_s3_connector_for_spec
 from dais.spec.loader import SpecLoadError, load_spec
 
 
@@ -29,6 +29,7 @@ def create_app(
     specs_dir: str | Path = "specs",
     business_processes_dir: str | Path = "business_processes",
     connector_factory: ConnectorFactory = build_connector_for_spec,
+    s3_factory: S3Factory = build_s3_connector_for_spec,
     api_key: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DAIS Pipeline API")
@@ -75,6 +76,7 @@ def create_app(
             connector_factory,
             record.run_id,
             req.stop_after,
+            s3_factory,
         )
         return RunResponse(run_id=record.run_id, status=record.status)
 

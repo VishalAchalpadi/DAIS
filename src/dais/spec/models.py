@@ -267,10 +267,19 @@ class AlertConfig(StrictModel):
 
 
 class QuarantineConfig(StrictModel):
+    kind: Literal["local", "s3"] = "s3"
     location: str
     alert: AlertConfig
 
     _v_location = field_validator("location")(_reject_placeholder)
+
+    @model_validator(mode="after")
+    def _location_matches_kind(self) -> "QuarantineConfig":
+        if self.kind == "s3" and not self.location.startswith("s3://"):
+            raise ValueError(f"quarantine.location must be an s3:// URI when kind is 's3', got {self.location!r}")
+        if self.kind == "local" and self.location.startswith("s3://"):
+            raise ValueError("quarantine.location must be a local path when kind is 'local', not an s3:// URI")
+        return self
 
 
 class QualityConfig(StrictModel):

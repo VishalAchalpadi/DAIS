@@ -1,8 +1,10 @@
+import json
+
 import polars as pl
 import pytest
 
-from dais.quality.file_validator import enforce_integrity_mode
-from dais.quality.row_validator import validate_dataframe
+from dais.quality.file_validator import enforce_integrity_mode, write_quarantine, write_raw_file_quarantine
+from dais.quality.row_validator import QuarantinedRow, validate_dataframe
 from dais.spec.models import QualityConfig
 from tests.conftest import requires_local_postgres
 
@@ -212,3 +214,65 @@ def test_sql_lookup_rejects_unknown_currency_code(ref_currencies):
     assert result.valid_df["currency"][0] == "USD"
     failed = {r.row_index for r in result.quarantined_rows}
     assert 1 in failed
+
+
+# ---------------------------------------------------------------------------
+# file_validator - local quarantine (no AWS account/S3Connector needed)
+# ---------------------------------------------------------------------------
+
+def _local_quality_cfg(tmp_path):
+    return QualityConfig(
+        integrity_mode="row_level",
+        rules=[{"column": "account_id", "checks": ["not_null"]}],
+        quarantine={
+            "kind": "local",
+            "location": str(tmp_path / "quarantine"),
+            "alert": {"channel": "log", "destination": "n/a"},
+        },
+    )
+
+
+def test_write_quarantine_local_creates_readable_json(tmp_path):
+    quality_cfg = _local_quality_cfg(tmp_path)
+    rows = [QuarantinedRow(row_index=2, row_data={"account_id": ""}, reasons=["account_id: non_empty"])]
+
+    path = write_quarantine(rows, quality_cfg, "assets_20260830.csv")
+
+    payload = json.loads((tmp_path / "quarantine").glob("*").__next__().read_text(encoding="utf-8"))
+    assert path.endswith(".quarantine.json")
+    assert payload[0]["row_index"] == 2
+    assert payload[0]["reasons"] == ["account_id: non_empty"]
+
+
+def test_write_quarantine_local_creates_directory_if_missing(tmp_path):
+    quality_cfg = _local_quality_cfg(tmp_path)
+    assert not (tmp_path / "quarantine").exists()
+
+    write_quarantine([], quality_cfg, "empty.csv")
+
+    assert (tmp_path / "quarantine").is_dir()
+
+
+def test_write_raw_file_quarantine_local_writes_original_bytes(tmp_path):
+    quality_cfg = _local_quality_cfg(tmp_path)
+    raw_bytes = b"portfolio_cd,as_of_date\nPORT0001,2026-08-30\n"
+
+    path = write_raw_file_quarantine(raw_bytes, quality_cfg, "assets_20260830.csv")
+
+    assert path.endswith(".quarantine")
+    from pathlib import Path
+
+    assert Path(path).read_bytes() == raw_bytes
+
+
+def test_write_quarantine_s3_kind_without_connector_raises(tmp_path):
+    quality_cfg = QualityConfig(
+        integrity_mode="row_level",
+        rules=[{"column": "account_id", "checks": ["not_null"]}],
+        quarantine={
+            "location": "s3://test-bucket/quarantine/",
+            "alert": {"channel": "log", "destination": "n/a"},
+        },
+    )
+    with pytest.raises(ValueError, match="S3Connector"):
+        write_quarantine([], quality_cfg, "file.csv", s3=None)

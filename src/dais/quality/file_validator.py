@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import polars as pl
 
@@ -59,9 +60,23 @@ def _quarantine_payload(rows: list[QuarantinedRow]) -> bytes:
     return json.dumps(payload, default=str, indent=2).encode("utf-8")
 
 
+def _local_quarantine_path(location: str, file_name: str, suffix: str) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    directory = Path(location)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{file_name}.{timestamp}.{suffix}"
+
+
 def write_quarantine(
-    rows: list[QuarantinedRow], quality_cfg: QualityConfig, file_name: str, s3: S3Connector
+    rows: list[QuarantinedRow], quality_cfg: QualityConfig, file_name: str, s3: S3Connector | None = None
 ) -> str:
+    if quality_cfg.quarantine.kind == "local":
+        path = _local_quarantine_path(quality_cfg.quarantine.location, file_name, "quarantine.json")
+        path.write_bytes(_quarantine_payload(rows))
+        return str(path)
+
+    if s3 is None:
+        raise ValueError("quality.quarantine.kind is 's3' but no S3Connector was provided")
     bucket, prefix = parse_s3_uri(quality_cfg.quarantine.location)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     key = f"{prefix.rstrip('/')}/{file_name}.{timestamp}.quarantine.json"
@@ -70,10 +85,17 @@ def write_quarantine(
 
 
 def write_raw_file_quarantine(
-    raw_bytes: bytes, quality_cfg: QualityConfig, file_name: str, s3: S3Connector
+    raw_bytes: bytes, quality_cfg: QualityConfig, file_name: str, s3: S3Connector | None = None
 ) -> str:
     """Control-gate failures happen before anything is parsed - quarantine
     the original file bytes, not row data."""
+    if quality_cfg.quarantine.kind == "local":
+        path = _local_quarantine_path(quality_cfg.quarantine.location, file_name, "quarantine")
+        path.write_bytes(raw_bytes)
+        return str(path)
+
+    if s3 is None:
+        raise ValueError("quality.quarantine.kind is 's3' but no S3Connector was provided")
     bucket, prefix = parse_s3_uri(quality_cfg.quarantine.location)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     key = f"{prefix.rstrip('/')}/{file_name}.{timestamp}.quarantine"
