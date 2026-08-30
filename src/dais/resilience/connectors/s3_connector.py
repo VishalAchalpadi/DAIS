@@ -44,3 +44,6 @@ class S3Connector:
             return [obj["Key"] for obj in response.get("Contents", [])]
 
         return self._run(_do)
+
+    def delete_object(self, bucket: str, key: str) -> None:
+        self._run(lambda: self._client.delete_object(Bucket=bucket, Key=key))

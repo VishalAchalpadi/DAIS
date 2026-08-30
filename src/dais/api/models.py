@@ -35,3 +35,37 @@ class BusinessProcessStatusResponse(BaseModel):
     sla_deadline: str
     now: str
     members: list[BusinessProcessMemberStatus]
+
+
+class QuarantineRecordSummaryResponse(BaseModel):
+    quarantine_id: str
+    file_name: str
+    row_count: int
+
+
+class QuarantinedRowPayload(BaseModel):
+    row_index: int
+    row_data: dict
+    reasons: list[str]
+    quarantined_at: str
+
+
+class ResubmitRow(BaseModel):
+    row_index: int
+    row_data: dict[str, str]
+
+
+class ResubmitRequest(BaseModel):
+    rows: list[ResubmitRow]
+
+
+class ResubmitFailure(BaseModel):
+    row_index: int | None = None
+    reasons: list[str] = []
+    error: str | None = None
+
+
+class ResubmitResponse(BaseModel):
+    accepted: bool
+    row_count_upserted: int
+    failures: list[ResubmitFailure] = []

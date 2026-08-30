@@ -9,19 +9,27 @@ import os
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, status
+from fastapi.responses import HTMLResponse
 
 from dais.api.models import (
     BusinessProcessMemberStatus,
     BusinessProcessStatusResponse,
+    QuarantinedRowPayload,
+    QuarantineRecordSummaryResponse,
+    ResubmitFailure,
+    ResubmitRequest,
+    ResubmitResponse,
     RunRequest,
     RunResponse,
     RunStatusResponse,
 )
+from dais.api.quarantine_ui import QUARANTINE_UI_HTML
 from dais.api.runs import RunRegistry
 from dais.api.worker import ConnectorFactory, S3Factory, execute_pipeline_background
 from dais.business_process.evaluator import evaluate_business_process
 from dais.business_process.loader import BusinessProcessLoadError, load_business_process
 from dais.db import build_connector_for_spec, build_s3_connector_for_spec
+from dais.quality.quarantine_review import list_quarantine_records, read_quarantine_record, resubmit_corrections
 from dais.spec.loader import SpecLoadError, load_spec
 
 
@@ -139,5 +147,62 @@ def create_app(
                 for m in result.members
             ],
         )
+
+    @app.get(
+        "/pipelines/{spec_name}/quarantine",
+        response_model=list[QuarantineRecordSummaryResponse],
+        dependencies=[Depends(check_api_key)],
+    )
+    def list_quarantine(spec_name: str) -> list[QuarantineRecordSummaryResponse]:
+        spec = load_spec_or_404(spec_name)
+        s3 = s3_factory(spec) if spec.quality.quarantine.kind == "s3" else None
+        records = list_quarantine_records(spec, s3)
+        return [
+            QuarantineRecordSummaryResponse(quarantine_id=r.quarantine_id, file_name=r.file_name, row_count=r.row_count)
+            for r in records
+        ]
+
+    @app.get(
+        "/pipelines/{spec_name}/quarantine/{quarantine_id}",
+        response_model=list[QuarantinedRowPayload],
+        dependencies=[Depends(check_api_key)],
+    )
+    def get_quarantine_record(spec_name: str, quarantine_id: str) -> list[QuarantinedRowPayload]:
+        spec = load_spec_or_404(spec_name)
+        s3 = s3_factory(spec) if spec.quality.quarantine.kind == "s3" else None
+        try:
+            rows = read_quarantine_record(spec, quarantine_id, s3)
+        except (FileNotFoundError, OSError) as exc:
+            raise HTTPException(status_code=404, detail=f"quarantine record not found: {exc}") from exc
+        return [QuarantinedRowPayload(**row) for row in rows]
+
+    @app.post(
+        "/pipelines/{spec_name}/quarantine/{quarantine_id}/resubmit",
+        response_model=ResubmitResponse,
+        dependencies=[Depends(check_api_key)],
+    )
+    def resubmit_quarantine(spec_name: str, quarantine_id: str, req: ResubmitRequest) -> ResubmitResponse:
+        spec = load_spec_or_404(spec_name)
+        s3 = s3_factory(spec) if spec.quality.quarantine.kind == "s3" else None
+        connector, _ = connector_factory(spec)
+        try:
+            outcome = resubmit_corrections(
+                spec,
+                quarantine_id,
+                [{"row_index": r.row_index, "row_data": r.row_data} for r in req.rows],
+                connector,
+                s3,
+            )
+        finally:
+            connector.close()
+        return ResubmitResponse(
+            accepted=outcome.accepted,
+            row_count_upserted=outcome.row_count_upserted,
+            failures=[ResubmitFailure(**f) for f in outcome.failures],
+        )
+
+    @app.get("/ui/quarantine/{spec_name}", response_class=HTMLResponse, include_in_schema=False)
+    def quarantine_ui(spec_name: str) -> str:
+        return QUARANTINE_UI_HTML.replace("__SPEC_NAME__", spec_name)
 
     return app

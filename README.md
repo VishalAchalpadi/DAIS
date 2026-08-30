@@ -151,6 +151,7 @@ trust the model.
 |---|---|
 | `strict` | **Any** row failing DQ quarantines the **entire file** - nothing is promoted to stage, not even the rows that passed. One set-based check over the whole batch. Use for data where partial promotion is risky (e.g. NAV/holdings). |
 | `row_level` | Only the failing rows are quarantined; every passing row still reaches stage. Use for high-volume/log-like feeds where losing a few bad rows is acceptable but blocking the whole file isn't. |
+| `group_level` | Only the failing rows AND every other row sharing their `quality.quarantine.group_by` key are quarantined - other groups are unaffected. Requires `quality.quarantine.group_by` (e.g. `[account_id]`). Use when a row is part of a larger logical unit (e.g. one holding within a portfolio) and letting the rest of that unit land while one row is missing would silently produce an incomplete/misleading set - `strict` is too broad (quarantines unrelated portfolios too) and `row_level` is too narrow (leaves the portfolio's other holdings looking complete when they aren't). |
 
 ### `quality.rules[].checks` - bare check names
 
@@ -286,6 +287,32 @@ see note below), and deduped by file checksum: submitting the same file twice
 while the first run is in flight (or already done) returns the *same*
 `run_id` instead of processing it twice - this is what makes a Control-M
 retry-after-timeout safe.
+
+### Reviewing and resubmitting quarantined rows
+
+With the API server running, open `http://127.0.0.1:8000/ui/quarantine/{spec_name}`
+in a browser - a page served by DAIS itself (not a hosted tool, so it can call
+back into the same running instance). It:
+
+1. Lists pending quarantine records for that pipeline (reads `quality.quarantine.location`,
+   `local` or `s3` per the spec).
+2. Lets you open one and edit the failing row's values inline.
+3. On resubmit, re-validates every edited row against the pipeline's
+   `quality.rules` - if any row still fails, **nothing is written** and every
+   failure is reported back, so a bad fix doesn't silently land. If all rows
+   pass, they're upserted straight into `stage.table` (keyed on
+   `stage.business_key`, regardless of the pipeline's own `write_mode`) and the
+   quarantine record is moved to a `resolved/` subdirectory - kept, not deleted.
+
+The same operations are plain REST endpoints if you want to script it instead
+of using the page:
+
+```
+GET  /pipelines/{spec_name}/quarantine                      -> [{quarantine_id, file_name, row_count}]
+GET  /pipelines/{spec_name}/quarantine/{quarantine_id}       -> [{row_index, row_data, reasons, quarantined_at}]
+POST /pipelines/{spec_name}/quarantine/{quarantine_id}/resubmit
+     body: {"rows": [{"row_index": 2, "row_data": {"col": "corrected value", ...}}]}
+```
 
 ### Example Control-M-style wrapper script
 

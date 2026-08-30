@@ -127,6 +127,51 @@ def test_no_business_key_means_no_duplicate_check():
     assert result.valid_df.height == 2
 
 
+def test_group_level_cascades_to_otherwise_valid_rows_in_same_group():
+    # 3 holdings for ACC01 (2 valid, 1 invalid) and 1 for ACC02 (valid) -
+    # the whole ACC01 group must be quarantined, ACC02 must survive.
+    df = pl.DataFrame(
+        {
+            "account_id": ["ACC01", "ACC01", "ACC01", "ACC02"],
+            "quantity": ["100.0000", "200.0000", "-5.0000", "50.0000"],
+            "as_of_date": ["20260101", "20260101", "20260101", "20260101"],
+        }
+    )
+    result = validate_dataframe(df, _rules().rules, group_by=["account_id"])
+
+    assert result.valid_df.height == 1
+    assert result.valid_df["account_id"][0] == "ACC02"
+    failed_indices = {r.row_index for r in result.quarantined_rows}
+    assert failed_indices == {0, 1, 2}
+    cascaded_row = next(r for r in result.quarantined_rows if r.row_index == 0)
+    assert "quarantined with group" in cascaded_row.reasons[0]
+
+
+def test_group_level_does_not_touch_unrelated_groups():
+    df = pl.DataFrame(
+        {
+            "account_id": ["ACC01", "ACC02", "ACC03"],
+            "quantity": ["-5.0000", "100.0000", "200.0000"],
+            "as_of_date": ["20260101", "20260101", "20260101"],
+        }
+    )
+    result = validate_dataframe(df, _rules().rules, group_by=["account_id"])
+    assert result.valid_df["account_id"].to_list() == ["ACC02", "ACC03"]
+
+
+def test_no_group_by_means_no_cascading():
+    df = pl.DataFrame(
+        {
+            "account_id": ["ACC01", "ACC01"],
+            "quantity": ["100.0000", "-5.0000"],
+            "as_of_date": ["20260101", "20260101"],
+        }
+    )
+    result = validate_dataframe(df, _rules().rules)
+    assert result.valid_df.height == 1
+    assert result.valid_df["account_id"][0] == "ACC01"
+
+
 def test_duplicate_business_key_combines_with_other_dq_failures():
     df = pl.DataFrame(
         {

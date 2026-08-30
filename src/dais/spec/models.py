@@ -269,6 +269,7 @@ class AlertConfig(StrictModel):
 class QuarantineConfig(StrictModel):
     kind: Literal["local", "s3"] = "s3"
     location: str
+    group_by: list[str] | None = None
     alert: AlertConfig
 
     _v_location = field_validator("location")(_reject_placeholder)
@@ -283,9 +284,24 @@ class QuarantineConfig(StrictModel):
 
 
 class QualityConfig(StrictModel):
-    integrity_mode: Literal["strict", "row_level"]
+    # strict: one bad row quarantines the whole file.
+    # row_level: only the failing row(s) are quarantined.
+    # group_level: every row sharing quarantine.group_by's key with a
+    # failing row is quarantined together, even rows that individually
+    # passed - prevents a single bad row (e.g. one holding) from leaving
+    # the rest of its group (e.g. that portfolio's other holdings) landed
+    # in stage as a silently-incomplete set.
+    integrity_mode: Literal["strict", "row_level", "group_level"]
     rules: list[QualityRule] = Field(default_factory=list)
     quarantine: QuarantineConfig
+
+    @model_validator(mode="after")
+    def _group_level_requires_group_by(self) -> "QualityConfig":
+        if self.integrity_mode == "group_level" and not self.quarantine.group_by:
+            raise ValueError("quality.quarantine.group_by is required when integrity_mode is 'group_level'")
+        if self.integrity_mode != "group_level" and self.quarantine.group_by:
+            raise ValueError("quality.quarantine.group_by is only used when integrity_mode is 'group_level'")
+        return self
 
 
 # ---------------------------------------------------------------------------

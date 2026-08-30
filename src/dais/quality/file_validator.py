@@ -36,7 +36,10 @@ def enforce_integrity_mode(result: ValidationResult, quality_cfg: QualityConfig)
             )
         return FileValidationOutcome(promoted_df=result.valid_df, file_quarantined=False, quarantined_rows=[])
 
-    if quality_cfg.integrity_mode == "row_level":
+    if quality_cfg.integrity_mode in ("row_level", "group_level"):
+        # group_level's cascading already happened in validate_dataframe -
+        # by this point quarantined_rows already includes every row swept
+        # in by a shared group key, so promotion is identical to row_level.
         return FileValidationOutcome(
             promoted_df=result.valid_df,
             file_quarantined=False,

@@ -79,11 +79,32 @@ def _apply_casts(df: pl.DataFrame, rules: list[QualityRule]) -> pl.DataFrame:
     return df.with_columns(exprs) if exprs else df
 
 
+def _cascade_group_failures(df: pl.DataFrame, failures: dict[int, list[str]], group_by: list[str]) -> dict[int, list[str]]:
+    """integrity_mode: group_level - once ANY row in a group (e.g. a
+    portfolio's account_id) has failed, every other row in that same
+    group is quarantined too, even ones that individually passed. A
+    partial, silently-incomplete group in stage (e.g. 9 of a portfolio's
+    10 holdings) is worse than quarantining the whole group."""
+    if not failures or not all(col in df.columns for col in group_by):
+        return failures
+
+    key_columns = df.select(group_by).rows()
+    failing_keys = {key_columns[idx] for idx in failures}
+
+    cascaded = dict(failures)
+    for idx, key in enumerate(key_columns):
+        if key in failing_keys and idx not in cascaded:
+            key_desc = ", ".join(f"{c}={v!r}" for c, v in zip(group_by, key))
+            cascaded[idx] = [f"quarantined with group ({key_desc}) - another row in this group failed DQ"]
+    return cascaded
+
+
 def validate_dataframe(
     df: pl.DataFrame,
     rules: list[QualityRule],
     connector: DatabaseConnector | None = None,
     business_key: list[str] | None = None,
+    group_by: list[str] | None = None,
 ) -> ValidationResult:
     if df.height == 0:
         return ValidationResult(valid_df=_apply_casts(df, rules), quarantined_rows=[])
@@ -93,6 +114,9 @@ def validate_dataframe(
     if business_key:
         for idx, reasons in _duplicate_business_key_indices(df, business_key).items():
             failures.setdefault(idx, []).extend(reasons)
+
+    if group_by:
+        failures = _cascade_group_failures(df, failures, group_by)
 
     if not failures:
         return ValidationResult(valid_df=_apply_casts(df, rules), quarantined_rows=[])

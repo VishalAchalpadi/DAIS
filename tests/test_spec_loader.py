@@ -200,3 +200,30 @@ def test_quarantine_kind_local_with_local_path_accepted():
     data["quality"]["quarantine"]["location"] = "./data/holdings/quarantine/"
     spec = PipelineSpec.model_validate(data)
     assert spec.quality.quarantine.kind == "local"
+
+
+# ---------------------------------------------------------------------------
+# quality.integrity_mode: group_level, requires quality.quarantine.group_by
+# ---------------------------------------------------------------------------
+
+def test_group_level_without_group_by_rejected():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["integrity_mode"] = "group_level"
+    with pytest.raises(ValidationError, match="group_by is required"):
+        PipelineSpec.model_validate(data)
+
+
+def test_group_by_without_group_level_rejected():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["quarantine"]["group_by"] = ["account_id"]
+    with pytest.raises(ValidationError, match="only used when integrity_mode"):
+        PipelineSpec.model_validate(data)
+
+
+def test_group_level_with_group_by_accepted():
+    data = _load_dict(VALID_SPEC)
+    data["quality"]["integrity_mode"] = "group_level"
+    data["quality"]["quarantine"]["group_by"] = ["account_id"]
+    spec = PipelineSpec.model_validate(data)
+    assert spec.quality.integrity_mode == "group_level"
+    assert spec.quality.quarantine.group_by == ["account_id"]

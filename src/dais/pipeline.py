@@ -123,7 +123,9 @@ def run_pipeline(
     handle = monitor.begin_step(run_id, spec.pipeline_name, "stage", stage_target)
     emitter.start("stage", run_id, inputs=[raw_target], outputs=[stage_target])
 
-    validation = validate_dataframe(parsed_df, spec.quality.rules, connector, spec.stage.business_key)
+    validation = validate_dataframe(
+        parsed_df, spec.quality.rules, connector, spec.stage.business_key, spec.quality.quarantine.group_by
+    )
     outcome = enforce_integrity_mode(validation, spec.quality)
 
     quarantine_location = None
