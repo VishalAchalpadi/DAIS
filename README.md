@@ -185,6 +185,21 @@ Anything else (e.g. `integer`, `float`) is **rejected at load time** - there's
 no cast implementation for it in `quality/row_validator.py`, so allowing it
 through would silently leave the column as text with no error anywhere.
 
+### Duplicate `stage.business_key` rows
+
+Row-level validation checks every row's `stage.business_key` columns for
+duplicates within the same incoming file, in addition to running
+`quality.rules`. The first occurrence of a key passes; every later
+occurrence is quarantined with reason `duplicate business key: (...)`,
+same as any other DQ failure - so it's subject to `integrity_mode` like
+everything else (whole file quarantined under `strict`, only the
+duplicate rows quarantined under `row_level`).
+
+This isn't optional or separately configured - it always runs when
+`stage.business_key` is set, because `write_mode: upsert` would otherwise
+fail at the database with `ON CONFLICT DO UPDATE command cannot affect
+row a second time` if a file ever contained the same key twice.
+
 ### `quality.quarantine.alert.channel`
 
 | Value | Behavior |

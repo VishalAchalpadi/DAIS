@@ -92,6 +92,54 @@ def test_empty_dataframe_produces_no_failures():
 
 
 # ---------------------------------------------------------------------------
+# row_validator - duplicate business_key detection
+# ---------------------------------------------------------------------------
+
+def test_duplicate_business_key_quarantines_later_occurrences():
+    df = pl.DataFrame(
+        {
+            "account_id": ["ACC01", "ACC02", "ACC01"],
+            "quantity": ["100.0000", "200.0000", "999.0000"],
+            "as_of_date": ["20260101", "20260101", "20260101"],
+        }
+    )
+    result = validate_dataframe(df, _rules().rules, business_key=["account_id", "as_of_date"])
+
+    assert result.valid_df.height == 2
+    assert result.valid_df["account_id"].to_list() == ["ACC01", "ACC02"]
+    failed = {r.row_index: r for r in result.quarantined_rows}
+    assert set(failed) == {2}
+    assert any("duplicate business key" in reason for reason in failed[2].reasons)
+
+
+def test_no_business_key_means_no_duplicate_check():
+    df = pl.DataFrame(
+        {
+            "account_id": ["ACC01", "ACC01"],
+            "quantity": ["100.0000", "200.0000"],
+            "as_of_date": ["20260101", "20260101"],
+        }
+    )
+    result = validate_dataframe(df, _rules().rules)
+    assert result.quarantined_rows == []
+    assert result.valid_df.height == 2
+
+
+def test_duplicate_business_key_combines_with_other_dq_failures():
+    df = pl.DataFrame(
+        {
+            "account_id": ["ACC01", "ACC01"],
+            "quantity": ["100.0000", "-5.0000"],
+            "as_of_date": ["20260101", "20260101"],
+        }
+    )
+    result = validate_dataframe(df, _rules().rules, business_key=["account_id", "as_of_date"])
+    row1 = next(r for r in result.quarantined_rows if r.row_index == 1)
+    assert any("duplicate business key" in reason for reason in row1.reasons)
+    assert any("greater_than_or_equal" in reason for reason in row1.reasons)
+
+
+# ---------------------------------------------------------------------------
 # file_validator - integrity_mode enforcement
 # ---------------------------------------------------------------------------
 

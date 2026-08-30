@@ -29,6 +29,26 @@ class ValidationResult:
     quarantined_rows: list[QuarantinedRow] = field(default_factory=list)
 
 
+def _duplicate_business_key_indices(df: pl.DataFrame, business_key: list[str]) -> dict[int, list[str]]:
+    """Flags every occurrence of a business key after the first as a DQ
+    failure, so duplicate rows are quarantined rather than silently
+    dropped or (in upsert mode) crashing the stage write with a
+    'ON CONFLICT DO UPDATE command cannot affect row a second time'
+    Postgres error."""
+    if not all(col in df.columns for col in business_key):
+        return {}
+
+    seen: set[tuple] = set()
+    failures: dict[int, list[str]] = {}
+    for idx, row in enumerate(df.select(business_key).iter_rows()):
+        if row in seen:
+            key_desc = ", ".join(f"{c}={v!r}" for c, v in zip(business_key, row))
+            failures[idx] = [f"duplicate business key: ({key_desc})"]
+        else:
+            seen.add(row)
+    return failures
+
+
 def _failing_indices(df: pl.DataFrame, rules: list[QualityRule], connector: DatabaseConnector | None) -> dict[int, list[str]]:
     schema = build_dataframe_schema(rules, connector)
     try:
@@ -60,12 +80,19 @@ def _apply_casts(df: pl.DataFrame, rules: list[QualityRule]) -> pl.DataFrame:
 
 
 def validate_dataframe(
-    df: pl.DataFrame, rules: list[QualityRule], connector: DatabaseConnector | None = None
+    df: pl.DataFrame,
+    rules: list[QualityRule],
+    connector: DatabaseConnector | None = None,
+    business_key: list[str] | None = None,
 ) -> ValidationResult:
     if df.height == 0:
         return ValidationResult(valid_df=_apply_casts(df, rules), quarantined_rows=[])
 
     failures = _failing_indices(df, rules, connector)
+
+    if business_key:
+        for idx, reasons in _duplicate_business_key_indices(df, business_key).items():
+            failures.setdefault(idx, []).extend(reasons)
 
     if not failures:
         return ValidationResult(valid_df=_apply_casts(df, rules), quarantined_rows=[])
