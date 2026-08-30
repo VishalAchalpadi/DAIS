@@ -25,6 +25,7 @@ dependencies = [
     "snowflake-sqlalchemy>=1.5",
     "boto3>=1.34",
     "structlog>=24.1",
+    "sqllineage>=1.5",
 ]
 
 [project.scripts]
