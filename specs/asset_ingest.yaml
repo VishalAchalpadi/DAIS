@@ -1,0 +1,167 @@
+# =========================================================================
+# Pipeline Spec: asset_ingest
+#
+# Daily portfolio/NAV asset file, CSV format. Fully filled in, no draft
+# placeholders. Local source + stop_after: gold - asset_gold.sql
+# aggregates portfolio-level stage rows into company-wide daily AUM.
+# =========================================================================
+
+pipeline_name: asset_ingest
+description: "Ingests daily comma-separated portfolio asset/NAV files into raw/stage"
+owner: "data-eng-team"
+# Not part of a business process group yet - add a members entry under
+# business_processes/ if/when this should be tracked against an SLA.
+
+# ------------------------------------------------------------------------
+# Execution control - pipeline can terminate cleanly at any layer.
+# stop_after: raw | stage | gold
+# ------------------------------------------------------------------------
+execution:
+  stop_after: gold
+
+# ------------------------------------------------------------------------
+# Database platform - SINGLE choice for the whole pipeline.
+# ------------------------------------------------------------------------
+database:
+  platform: postgres              # postgres | snowflake
+  connection: "aurora_postgres_prod"
+
+# ------------------------------------------------------------------------
+# Process monitor - SHARED table across all pipelines, not created per-spec.
+# ------------------------------------------------------------------------
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: csv
+  location:
+    kind: local
+    path: "./data/assets/incoming/"
+    file_pattern: "assets_{date}.csv"
+
+# ------------------------------------------------------------------------
+# CSV parser - header-aware, standard comma delimiter.
+# ------------------------------------------------------------------------
+parser:
+  type: csv
+  has_header: true
+
+# ------------------------------------------------------------------------
+# Control gates - pre-flight checks on the WHOLE file, run BEFORE anything
+# lands in raw.
+# ------------------------------------------------------------------------
+control_gates:
+  file_size:
+    min_bytes: 50
+    max_bytes: 10000000
+  row_count:
+    min_rows: 5
+    max_rows: 100000
+  on_fail: quarantine_file
+
+# ------------------------------------------------------------------------
+# RAW layer (bronze) - plain Postgres table, untyped, no enforcement.
+# ------------------------------------------------------------------------
+raw:
+  schema: data_in
+  table: asset_raw
+  ddl_mode: create_if_not_exists
+  column_type: text
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true
+
+# ------------------------------------------------------------------------
+# Data quality - enforced only on the raw -> stage transition.
+# ------------------------------------------------------------------------
+quality:
+  integrity_mode: strict   # one bad row quarantines the WHOLE file
+  rules:
+    - column: portfolio_cd
+      checks: [not_null, non_empty]
+    - column: as_of_date
+      checks: [not_null, valid_date]
+      cast_to: date
+      format: "%Y-%m-%d"
+    - column: total_net_assets
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 2
+    - column: net_asset_value
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 6
+    - column: base_currency
+      checks: [not_null]
+      lookup:                      # SQL-based reference check, not a static list
+        type: sql
+        query: >
+          SELECT 1 FROM ref.currencies
+          WHERE currency_code = :value
+        on_fail: quarantine
+    - column: total_net_assets_usd
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 2
+    - column: shares
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 4
+    - column: cash
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 2
+  quarantine:
+    location: "s3://dais-example-bucket/assets/quarantine/"
+    alert:
+      channel: log
+      destination: "DQ-alerts@example.com"
+
+# ------------------------------------------------------------------------
+# STAGE layer (silver) - typed, validated, conformed.
+# ------------------------------------------------------------------------
+stage:
+  schema: data_in
+  table: asset_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["portfolio_cd", "as_of_date"]
+  write_mode: upsert
+
+# ------------------------------------------------------------------------
+# GOLD layer - company-wide daily AUM, aggregated from every portfolio's
+# stage-layer total_net_assets_usd. Fewer rows than stage (one row per
+# as_of_date instead of one per portfolio) and a different column set
+# (as_of_date, company_aum, daily_aum_change_pct, gold_loaded_at).
+# ------------------------------------------------------------------------
+gold:
+  schema: core
+  dbt_project: "dbt/"
+  dbt_select: "asset_gold"
+
+# ------------------------------------------------------------------------
+# Resilience - applies to all Postgres/S3/API calls in this pipeline
+# ------------------------------------------------------------------------
+resilience:
+  retry:
+    max_attempts: 5
+    backoff: exponential
+    base_delay_seconds: 2
+    jitter: true
+
+# ------------------------------------------------------------------------
+# Lineage
+# ------------------------------------------------------------------------
+lineage:
+  namespace: "datamesh-prod"
+  job_name: asset_ingest
