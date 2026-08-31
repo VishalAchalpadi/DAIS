@@ -344,6 +344,17 @@ while true; do
 done
 ```
 
+### Orchestrating with Airflow
+
+`airflow/dags/dais_pipelines.py` is a ready-to-drop-in DAG that triggers
+`asset_ingest`/`holdings_ingest`/`price_ingest`/`benchmark_ingest` through the
+HTTP API above (same trigger-and-poll pattern as the Control-M script) - DAIS
+itself needs no Airflow-specific code. It's not wired up or installed in this
+environment (Airflow doesn't run natively on Windows - it needs WSL2 or
+Docker, neither of which is set up here); the file's docstring covers the
+Airflow Connection/Variable setup needed to actually run it once you have an
+Airflow instance to drop it into.
+
 ## Known scope decisions / limitations
 
 A few things were deliberately scoped down rather than left half-built:
