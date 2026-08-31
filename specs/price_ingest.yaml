@@ -1,0 +1,167 @@
+# =========================================================================
+# Pipeline Spec: price_ingest
+# =========================================================================
+
+pipeline_name: price_ingest
+description: "Ingests daily comma-separated price files into raw/stage"
+owner: "data-eng-team"
+# Not part of a business process group yet - add a members entry under
+# business_processes/ if/when this should be tracked against an SLA.
+
+# ------------------------------------------------------------------------
+# Execution control - pipeline can terminate cleanly at any layer.
+# stop_after: raw | stage | gold
+# ------------------------------------------------------------------------
+execution:
+  stop_after: gold
+
+# ------------------------------------------------------------------------
+# Database platform - SINGLE choice for the whole pipeline.
+# ------------------------------------------------------------------------
+database:
+  platform: postgres              # postgres | snowflake
+  connection: "aurora_postgres_prod"
+
+# ------------------------------------------------------------------------
+# Process monitor - SHARED table across all pipelines, not created per-spec.
+# ------------------------------------------------------------------------
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: csv
+  location:
+    kind: local
+    path: "./data/prices/incoming/"
+    file_pattern: "prices_{date}.csv"
+
+# ------------------------------------------------------------------------
+# CSV parser - header-aware, standard comma delimiter.
+# ------------------------------------------------------------------------
+parser:
+  type: csv
+  has_header: true
+
+# ------------------------------------------------------------------------
+# Control gates - pre-flight checks on the WHOLE file, run BEFORE anything
+# lands in raw.
+# ------------------------------------------------------------------------
+control_gates:
+  file_size:
+    min_bytes: 50
+    max_bytes: 10000000
+  row_count:
+    min_rows: 5
+    max_rows: 100000
+  on_fail: quarantine_file
+
+# ------------------------------------------------------------------------
+# RAW layer (bronze) - plain Postgres table, untyped, no enforcement.
+# ------------------------------------------------------------------------
+raw:
+  schema: data_in
+  table: price_raw
+  ddl_mode: create_if_not_exists
+  column_type: text
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true
+
+# ------------------------------------------------------------------------
+# Data quality - enforced only on the raw -> stage transition.
+# ------------------------------------------------------------------------
+quality:
+  integrity_mode: row_level   # one bad row quarantines the WHOLE file
+  rules:
+    - column: Date
+      checks: [not_null, valid_date, non_empty]
+      cast_to: date
+      format: "%m/%d/%Y"
+    - column: Ticker
+      checks: [not_null, non_empty]
+    - column: Open
+      checks: [is_numeric]
+      cast_to: decimal
+      precision: 18
+      scale: 10
+    - column: High
+      checks: [is_numeric]
+      cast_to: decimal
+      precision: 18
+      scale: 10
+    - column: Low
+      checks: [is_numeric]
+      cast_to: decimal
+      precision: 18
+      scale: 10
+    - column: Close
+      checks: [is_numeric]
+      cast_to: decimal
+      precision: 18
+      scale: 10
+    - column: Volume
+      checks: [is_numeric]
+      cast_to: decimal
+      precision: 18
+      scale: 0
+    - column: Adjusted
+      checks: [is_numeric]
+      cast_to: decimal
+      precision: 18
+      scale: 10
+    - column: Returns
+      checks: [is_numeric]
+      cast_to: decimal
+      precision: 20
+      scale: 15
+  quarantine:
+    kind: local
+    location: "./data/prices/quarantine/"
+    alert:
+      channel: log
+      destination: "DQ-alerts@example.com"
+
+# ------------------------------------------------------------------------
+# STAGE layer (silver) - typed, validated, conformed.
+# ------------------------------------------------------------------------
+stage:
+  schema: data_in
+  table: price_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["Date", "Ticker"]
+  write_mode: upsert
+
+# ------------------------------------------------------------------------
+# GOLD layer - one row per ticker: average trading volume and total price
+# return ((last Close - first Close) / first Close) over the period
+# covered by stage. Fewer rows than stage (one per ticker, not one per
+# ticker-date) and a different column set (ticker, avg_volume,
+# total_return, gold_loaded_at).
+# ------------------------------------------------------------------------
+gold:
+  schema: core
+  dbt_project: "dbt/"
+  dbt_select: "price_gold"
+
+# ------------------------------------------------------------------------
+# Resilience - applies to all Postgres/S3/API calls in this pipeline
+# ------------------------------------------------------------------------
+resilience:
+  retry:
+    max_attempts: 5
+    backoff: exponential
+    base_delay_seconds: 2
+    jitter: true
+
+# ------------------------------------------------------------------------
+# Lineage
+# ------------------------------------------------------------------------
+lineage:
+  namespace: "datamesh-prod"
+  job_name: price_ingest
