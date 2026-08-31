@@ -251,7 +251,13 @@ async function resubmit() {
       body: JSON.stringify({ rows: rowsPayload }),
     });
     if (result.accepted) {
-      msgEl.innerHTML = `<div class="msg ok">Accepted - ${result.row_count_upserted} row(s) upserted into stage. Record marked resolved.</div>`;
+      let text = `Accepted - ${result.row_count_upserted} row(s) upserted into stage. Record marked resolved.`;
+      if (result.layer_reached === "gold") {
+        text += "\\nGold refreshed successfully.";
+      } else if (result.gold_error) {
+        text += `\\nStage updated, but the gold refresh failed:\\n${result.gold_error}`;
+      }
+      msgEl.innerHTML = `<div class="msg ${result.gold_error ? 'err' : 'ok'}">${text}</div>`;
     } else {
       const details = result.failures.map(f => `row ${f.row_index ?? "?"}: ${(f.reasons || [f.error]).join(", ")}`).join("\\n");
       msgEl.innerHTML = `<div class="msg err">Rejected - one or more rows still fail validation, nothing was written:\\n${details}</div>`;

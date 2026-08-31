@@ -184,7 +184,7 @@ def create_app(
     def resubmit_quarantine(spec_name: str, quarantine_id: str, req: ResubmitRequest) -> ResubmitResponse:
         spec = load_spec_or_404(spec_name)
         s3 = s3_factory(spec) if spec.quality.quarantine.kind == "s3" else None
-        connector, _ = connector_factory(spec)
+        connector, connection_params = connector_factory(spec)
         try:
             outcome = resubmit_corrections(
                 spec,
@@ -192,6 +192,7 @@ def create_app(
                 [{"row_index": r.row_index, "row_data": r.row_data} for r in req.rows],
                 connector,
                 s3,
+                connection_params,
             )
         finally:
             connector.close()
@@ -199,6 +200,8 @@ def create_app(
             accepted=outcome.accepted,
             row_count_upserted=outcome.row_count_upserted,
             failures=[ResubmitFailure(**f) for f in outcome.failures],
+            layer_reached=outcome.layer_reached,
+            gold_error=outcome.gold_error,
         )
 
     @app.get("/ui/quarantine/{spec_name}", response_class=HTMLResponse, include_in_schema=False)

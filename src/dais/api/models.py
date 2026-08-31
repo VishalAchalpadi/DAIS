@@ -69,3 +69,5 @@ class ResubmitResponse(BaseModel):
     accepted: bool
     row_count_upserted: int
     failures: list[ResubmitFailure] = []
+    layer_reached: str | None = None
+    gold_error: str | None = None

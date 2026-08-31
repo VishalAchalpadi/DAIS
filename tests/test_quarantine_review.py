@@ -10,17 +10,20 @@ from dais.quality.quarantine_review import (
     resubmit_corrections,
 )
 from dais.spec.models import PipelineSpec
-from tests.conftest import requires_local_postgres
+from tests.conftest import _local_pg_creds, requires_local_postgres
 
 FIXTURE = Path(__file__).parent / "fixtures" / "valid_holdings_ingest.yaml"
+DBT_PROJECT = str(Path(__file__).parent.parent / "dbt")
 
 
-def _spec_with_local_quarantine(tmp_path, schema="dais_test_review") -> PipelineSpec:
+def _spec_with_local_quarantine(tmp_path, schema="dais_test_review", stop_after="gold") -> PipelineSpec:
     data = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
     data["raw"]["schema"] = schema
     data["stage"]["schema"] = schema
     data["gold"]["schema"] = schema
+    data["gold"]["dbt_project"] = DBT_PROJECT
     data["monitoring"]["schema"] = schema
+    data["execution"]["stop_after"] = stop_after
     data["quality"]["quarantine"] = {
         "kind": "local",
         "location": str(tmp_path / "quarantine"),
@@ -66,7 +69,7 @@ def test_list_and_read_quarantine_record(tmp_path):
 
 @requires_local_postgres
 def test_resubmit_corrections_upserts_and_marks_resolved(pg_connector, test_schema, tmp_path):
-    spec = _spec_with_local_quarantine(tmp_path, schema=test_schema)
+    spec = _spec_with_local_quarantine(tmp_path, schema=test_schema, stop_after="stage")
     from dais.resilience.connectors.base import ColumnDef
 
     pg_connector.create_table_if_not_exists(
@@ -122,11 +125,82 @@ def test_resubmit_corrections_upserts_and_marks_resolved(pg_connector, test_sche
 
     assert outcome.accepted is True
     assert outcome.row_count_upserted == 1
+    assert outcome.layer_reached == "stage"
     assert not record_path.exists()
     assert (tmp_path / "quarantine" / "resolved" / quarantine_id).exists()
 
     rows = pg_connector.value_exists(test_schema, spec.stage.table, "account_id", "ACC01")
     assert rows is True
+
+
+@requires_local_postgres
+def test_resubmit_corrections_refreshes_gold_when_stop_after_is_gold(pg_connector, test_schema, tmp_path):
+    spec = _spec_with_local_quarantine(tmp_path, schema=test_schema, stop_after="gold")
+    from dais.resilience.connectors.base import ColumnDef
+
+    pg_connector.create_table_if_not_exists(
+        test_schema,
+        spec.stage.table,
+        [
+            ColumnDef("account_id", "TEXT"),
+            ColumnDef("security_id", "TEXT"),
+            ColumnDef("as_of_date", "DATE"),
+            ColumnDef("quantity", "NUMERIC(18,4)"),
+            ColumnDef("market_value", "NUMERIC(18,2)"),
+            ColumnDef("currency", "TEXT"),
+        ],
+        unique_columns=spec.stage.business_key,
+    )
+
+    record_path = _write_record(
+        tmp_path,
+        "HOLDINGS_20260101.txt",
+        [
+            {
+                "row_index": 0,
+                "row_data": {
+                    "account_id": "",
+                    "security_id": "SEC01",
+                    "as_of_date": "20260101",
+                    "quantity": "100.0000",
+                    "market_value": "5000.00",
+                    "currency": "USD",
+                },
+                "reasons": ["account_id: non_empty"],
+                "quarantined_at": "x",
+            }
+        ],
+    )
+    quarantine_id = record_path.name
+
+    creds = _local_pg_creds()
+    connection_params = {
+        "host": creds["host"], "port": creds["port"], "dbname": creds["dbname"],
+        "user": creds["user"], "password": creds["password"],
+    }
+
+    corrected = [
+        {
+            "row_index": 0,
+            "row_data": {
+                "account_id": "ACC01",
+                "security_id": "SEC01",
+                "as_of_date": "20260101",
+                "quantity": "100.0000",
+                "market_value": "5000.00",
+                "currency": "USD",
+            },
+        }
+    ]
+
+    outcome = resubmit_corrections(spec, quarantine_id, corrected, pg_connector, connection_params=connection_params)
+
+    assert outcome.accepted is True
+    assert outcome.layer_reached == "gold"
+    assert outcome.gold_error is None
+
+    gold_rows = pg_connector.fetch_all(f'SELECT COUNT(*) FROM "{test_schema}"."{spec.gold.dbt_select}"')
+    assert gold_rows[0][0] >= 1
 
 
 @requires_local_postgres

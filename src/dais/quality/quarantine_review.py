@@ -9,6 +9,12 @@ since a correction is a targeted single-key fix regardless of whether
 the pipeline's bulk loads are configured as append/truncate_load/upsert.
 Resolved records are moved into a `resolved/` subdirectory (local) or
 key prefix (S3) rather than deleted, keeping the audit trail intact.
+
+If the pipeline's `execution.stop_after` is `gold`, a successful
+resubmission also re-runs the dbt gold model - a correction that only
+updates stage would leave gold quietly stale relative to what a normal
+run promises, exactly like the main pipeline itself always carries a
+successful stage write through to gold when configured to.
 """
 from __future__ import annotations
 
@@ -19,6 +25,7 @@ from urllib.parse import quote, unquote
 
 import polars as pl
 
+from dais.medallion.gold import run_gold
 from dais.quality.row_validator import validate_dataframe
 from dais.resilience.connectors.base import DatabaseConnector
 from dais.resilience.connectors.s3_connector import S3Connector, parse_s3_uri
@@ -37,6 +44,8 @@ class ResubmitOutcome:
     accepted: bool
     row_count_upserted: int
     failures: list[dict] = field(default_factory=list)  # [{row_index, reasons}]
+    layer_reached: str | None = None  # "stage" | "gold" - only meaningful when accepted
+    gold_error: str | None = None  # set when layer_reached stays "stage" because gold refresh failed
 
 
 def _local_dir(spec: PipelineSpec) -> Path:
@@ -111,10 +120,15 @@ def resubmit_corrections(
     corrected_rows: list[dict],
     connector: DatabaseConnector,
     s3: S3Connector | None = None,
+    connection_params: dict | None = None,
 ) -> ResubmitOutcome:
     """corrected_rows: [{"row_index": <original int>, "row_data": {col: value, ...}}].
     All-or-nothing - if any corrected row still fails quality.rules,
-    nothing is written and every failure is reported back."""
+    nothing is written and every failure is reported back.
+
+    connection_params (host/port/dbname/user/password) is required only
+    when spec.execution.stop_after is "gold" - dbt needs its own
+    connection, same as a normal pipeline run's gold step."""
     if not corrected_rows:
         return ResubmitOutcome(accepted=False, row_count_upserted=0, failures=[{"error": "no rows submitted"}])
 
@@ -138,4 +152,25 @@ def resubmit_corrections(
     )
 
     _mark_resolved(spec, quarantine_id, s3)
-    return ResubmitOutcome(accepted=True, row_count_upserted=row_count_out, failures=[])
+
+    if spec.execution.stop_after != "gold":
+        return ResubmitOutcome(accepted=True, row_count_upserted=row_count_out, layer_reached="stage")
+
+    if connection_params is None:
+        return ResubmitOutcome(
+            accepted=True,
+            row_count_upserted=row_count_out,
+            layer_reached="stage",
+            gold_error="execution.stop_after is 'gold' but no connection_params were provided to refresh it",
+        )
+
+    gold_result = run_gold(spec, **connection_params)
+    if not gold_result.success:
+        return ResubmitOutcome(
+            accepted=True,
+            row_count_upserted=row_count_out,
+            layer_reached="stage",
+            gold_error=gold_result.stderr or gold_result.stdout,
+        )
+
+    return ResubmitOutcome(accepted=True, row_count_upserted=row_count_out, layer_reached="gold")
