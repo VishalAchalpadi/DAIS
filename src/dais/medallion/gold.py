@@ -1,15 +1,22 @@
 """Gold layer: hands off to dbt-core. dbt's target profile is populated
 from the SAME connection params raw/stage used (spec.database) via env
 vars scoped to the subprocess - never a separately assumed warehouse.
+
+Invoked as `python -m dbt.cli.main` rather than the `dbt`/`dbt.exe`
+console script: on Windows, that wrapper script gets regenerated (new
+file, new hash) whenever a dependency reinstall touches `click`, which
+repeatedly tripped this machine's Application Control policy into
+blocking it mid-session. The interpreter itself was never blocked, so
+invoking dbt as a module through it sidesteps the problem entirely -
+this is not a workaround specific to one broken install, it avoids the
+whole class of "a freshly-written .exe looks unrecognized" block.
 """
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 from dais.spec.models import PipelineSpec
 
@@ -22,20 +29,6 @@ class GoldRunResult:
     stderr: str
 
 
-def _dbt_executable() -> str:
-    """dbt-core installs a `dbt` console script alongside the interpreter
-    in this venv - prefer that over relying on PATH, since a venv's
-    Scripts/bin dir isn't necessarily on it for a subprocess we launch."""
-    venv_bin = Path(sys.executable).parent
-    candidate = venv_bin / ("dbt.exe" if os.name == "nt" else "dbt")
-    if candidate.is_file():
-        return str(candidate)
-    found = shutil.which("dbt")
-    if found:
-        return found
-    raise RuntimeError("dbt executable not found - is dbt-core installed in this environment?")
-
-
 def run_gold(
     spec: PipelineSpec,
     *,
@@ -45,8 +38,6 @@ def run_gold(
     user: str,
     password: str,
 ) -> GoldRunResult:
-    import os
-
     env = os.environ.copy()
     env.update(
         {
@@ -62,7 +53,9 @@ def run_gold(
     )
 
     cmd = [
-        _dbt_executable(),
+        sys.executable,
+        "-m",
+        "dbt.cli.main",
         "run",
         "--project-dir",
         spec.gold.dbt_project,

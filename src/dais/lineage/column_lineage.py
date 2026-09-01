@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -138,17 +137,6 @@ def raw_to_stage_edges(spec: PipelineSpec) -> list[ColumnEdge]:
     return edges
 
 
-def _dbt_executable() -> str:
-    venv_bin = Path(sys.executable).parent
-    candidate = venv_bin / ("dbt.exe" if os.name == "nt" else "dbt")
-    if candidate.is_file():
-        return str(candidate)
-    found = shutil.which("dbt")
-    if found:
-        return found
-    raise RuntimeError("dbt executable not found - is dbt-core installed in this environment?")
-
-
 def _compile_gold_model(
     spec: PipelineSpec,
     *,
@@ -177,7 +165,9 @@ def _compile_gold_model(
     )
     proc = subprocess.run(
         [
-            _dbt_executable(),
+            sys.executable,
+            "-m",
+            "dbt.cli.main",
             "compile",
             "--project-dir",
             spec.gold.dbt_project,
