@@ -1,6 +1,7 @@
--- Per-ticker gold summary from stage's daily price rows: average trading
--- volume, and total price return over the period covered by stage
--- ((last Close - first Close) / first Close, ordered by Date).
+-- Per-(ticker, as_of_date) gold summary from stage's daily price rows:
+-- average trading volume, and total price return over the period
+-- covered by stage ((last Close - first Close) / first Close, ordered
+-- by Date).
 --
 -- as_of_date is NOT derived from stage data - it's the date embedded in
 -- the SOURCE FILE NAME that triggered this run (e.g.
@@ -10,10 +11,12 @@
 -- refresh, which has no single source file).
 --
 -- SCD Type 2 (see specs/price_ingest.yaml's gold.scd_type/scd_key and
--- dbt/macros/dais_scd2.sql): as_of_date is a TRACKED column alongside
--- avg_volume/total_return, so every run against a new file's date adds
--- a new version for every ticker (even if the computed values happen
--- to match) - active_flag=true marks the current version,
+-- dbt/macros/dais_scd2.sql): the business key is (ticker, as_of_date),
+-- NOT ticker alone - a new as_of_date is a different key, not a new
+-- version of an existing one. A version only increments when
+-- avg_volume/total_return change for the SAME (ticker, as_of_date)
+-- pair on a later run (e.g. a same-day correction file) -
+-- active_flag=true marks the current version of each pair,
 -- expiry_datetime is set on whichever version got superseded.
 
 {{
@@ -69,4 +72,4 @@ current_snapshot as (
 
 )
 
-{{ dais_scd2('current_snapshot', ['ticker'], ['avg_volume', 'total_return', 'as_of_date']) }}
+{{ dais_scd2('current_snapshot', ['ticker', 'as_of_date'], ['avg_volume', 'total_return']) }}
