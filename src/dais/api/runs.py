@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dais.pipeline import PipelineRunResult
 
@@ -21,6 +21,8 @@ class RunRecord:
     status: str  # "running" | "succeeded" | "failed" | "quarantined"
     layer_reached: str | None = None
     error: str | None = None
+    quarantine_location: str | None = None
+    failure_reasons: list[str] = field(default_factory=list)
 
 
 class RunRegistry:
@@ -54,6 +56,8 @@ class RunRegistry:
             record.status = result.status
             record.layer_reached = result.layer_reached
             record.error = result.error
+            record.quarantine_location = result.quarantine_location
+            record.failure_reasons = result.failure_reasons
 
     def mark_failed(self, run_id: str, error: str) -> None:
         with self._lock:

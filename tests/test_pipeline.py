@@ -141,6 +141,32 @@ def test_control_gate_failure_quarantines_before_raw(pg_connector, test_schema, 
     assert not pg_connector.table_exists(test_schema, spec.raw.table)
     assert result.quarantine_location is not None
     assert Path(result.quarantine_location).is_file()
+    assert any("row_count" in r for r in result.failure_reasons)
+
+
+def test_strict_dq_quarantine_surfaces_failure_reasons(pg_connector, test_schema, tmp_path):
+    spec = _spec_for_schema(test_schema, stop_after="stage")
+    spec.control_gates.row_count.min_rows = 1
+    spec.control_gates.row_count.max_rows = 1000
+    spec.control_gates.file_size.min_bytes = 1
+    spec.control_gates.file_size.max_bytes = 100_000
+    spec.quality.quarantine.kind = "local"
+    spec.quality.quarantine.location = str(tmp_path / "quarantine")
+
+    file_path = _write_sample_file(
+        tmp_path,
+        [
+            _sample_line("ACC01", "SEC01", "20260101", "100.0000", "5000.00", "USD"),
+            _sample_line("ACC02", "SEC02", "20260101", "-5.0000", "5000.00", "USD"),  # negative quantity
+        ],
+    )
+
+    result = run_pipeline(spec, file_path=str(file_path), connector=pg_connector)
+
+    assert result.status == "quarantined"
+    assert result.quarantine_location is not None
+    assert Path(result.quarantine_location).is_file()
+    assert any("quantity" in r and "greater_than_or_equal" in r for r in result.failure_reasons)
 
 
 def test_large_file_takes_the_chunked_parse_path(pg_connector, test_schema, tmp_path, ref_currencies, monkeypatch):

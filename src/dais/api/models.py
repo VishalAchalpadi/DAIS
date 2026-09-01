@@ -20,6 +20,8 @@ class RunStatusResponse(BaseModel):
     layer_reached: str | None = None
     checksum: str | None = None
     error: str | None = None
+    quarantine_location: str | None = None
+    failure_reasons: list[str] = []
 
 
 class BusinessProcessMemberStatus(BaseModel):

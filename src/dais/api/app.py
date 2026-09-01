@@ -104,6 +104,8 @@ def create_app(
             layer_reached=record.layer_reached,
             checksum=record.checksum,
             error=record.error,
+            quarantine_location=record.quarantine_location,
+            failure_reasons=record.failure_reasons,
         )
 
     @app.get(

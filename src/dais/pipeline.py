@@ -6,7 +6,7 @@ YAML spec, never a change here.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dais.execution import layers_to_run
@@ -44,6 +44,7 @@ class PipelineRunResult:
     checksum: str | None = None
     quarantine_location: str | None = None
     error: str | None = None
+    failure_reasons: list[str] = field(default_factory=list)
 
 
 def _read_source_bytes(file_path: str, s3: S3Connector | None) -> bytes:
@@ -91,6 +92,7 @@ def run_pipeline(
             layer_reached=None,
             quarantine_location=quarantine_location,
             error="; ".join(gate_result.failures),
+            failure_reasons=gate_result.failures,
         )
     monitor.complete_step(handle, row_count_in=gate_result.row_count, row_count_out=gate_result.row_count)
     emitter.complete("control_gate", run_id)
@@ -129,9 +131,11 @@ def run_pipeline(
     outcome = enforce_integrity_mode(validation, spec.quality)
 
     quarantine_location = None
+    dq_failure_reasons: list[str] = []
     if outcome.quarantined_rows:
         raise_alert(outcome, spec.quality, file_name)
         quarantine_location = write_quarantine(outcome.quarantined_rows, spec.quality, file_name, s3)
+        dq_failure_reasons = sorted({reason for row in outcome.quarantined_rows for reason in row.reasons})
 
     if outcome.file_quarantined:
         monitor.quarantine_step(handle, row_count_in=parsed_df.height, row_count_out=0)
@@ -143,6 +147,7 @@ def run_pipeline(
             checksum=raw_result.checksum,
             quarantine_location=quarantine_location,
             error=f"{len(outcome.quarantined_rows)} row(s) failed strict DQ",
+            failure_reasons=dq_failure_reasons,
         )
 
     stage_result = land_stage(outcome.promoted_df, spec, connector)
@@ -151,7 +156,12 @@ def run_pipeline(
 
     if "gold" not in layers:
         return PipelineRunResult(
-            run_id=run_id, status="succeeded", layer_reached="stage", checksum=raw_result.checksum
+            run_id=run_id,
+            status="succeeded",
+            layer_reached="stage",
+            checksum=raw_result.checksum,
+            quarantine_location=quarantine_location,
+            failure_reasons=dq_failure_reasons,
         )
 
     # --- gold: dbt handoff ---
@@ -178,5 +188,10 @@ def run_pipeline(
     emitter.complete("gold", run_id, outputs=[gold_target])
 
     return PipelineRunResult(
-        run_id=run_id, status="succeeded", layer_reached="gold", checksum=raw_result.checksum
+        run_id=run_id,
+        status="succeeded",
+        layer_reached="gold",
+        checksum=raw_result.checksum,
+        quarantine_location=quarantine_location,
+        failure_reasons=dq_failure_reasons,
     )
