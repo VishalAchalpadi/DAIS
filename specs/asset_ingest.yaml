@@ -142,13 +142,21 @@ stage:
 # ------------------------------------------------------------------------
 # GOLD layer - company-wide daily AUM, aggregated from every portfolio's
 # stage-layer total_net_assets_usd. Fewer rows than stage (one row per
-# as_of_date instead of one per portfolio) and a different column set
-# (as_of_date, company_aum, daily_aum_change_pct, gold_loaded_at).
+# as_of_date instead of one per portfolio). SCD Type 2, keyed on
+# as_of_date itself (a real business column already in stage, unlike
+# price_gold which has to derive it from the source file name) - a
+# version only increments if a later run recomputes a different
+# company_aum/daily_aum_change_pct for an as_of_date already seen (e.g.
+# a late-arriving correction for an earlier date). Columns: as_of_date,
+# company_aum, daily_aum_change_pct, version, effective_datetime,
+# expiry_datetime, active_flag, scd_pk (primary key).
 # ------------------------------------------------------------------------
 gold:
   schema: core
   dbt_project: "dbt/"
   dbt_select: "asset_gold"
+  scd_type: 2
+  scd_key: ["as_of_date"]
 
 # ------------------------------------------------------------------------
 # Resilience - applies to all Postgres/S3/API calls in this pipeline
