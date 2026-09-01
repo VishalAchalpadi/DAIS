@@ -14,11 +14,30 @@ whole class of "a freshly-written .exe looks unrecognized" block.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
 
 from dais.spec.models import PipelineSpec
+
+_DATE_IN_FILENAME_RE = re.compile(r"(\d{8})")
+
+
+def _extract_as_of_date(file_name: str | None) -> str | None:
+    """Best-effort: pulls the first YYYYMMDD run of digits out of a
+    source file name (e.g. portfolio_prices_20260830.csv -> 2026-08-30).
+    Not tied to a spec's `file_pattern` - real file names vary (prefixes,
+    "-Correction" suffixes) more than that convention captures. Returns
+    None if no 8-digit date-shaped run is found; a gold model that reads
+    DBT_AS_OF_DATE should fall back sensibly (e.g. env_var default)."""
+    if not file_name:
+        return None
+    match = _DATE_IN_FILENAME_RE.search(file_name)
+    if not match:
+        return None
+    raw = match.group(1)
+    return f"{raw[0:4]}-{raw[4:6]}-{raw[6:8]}"
 
 
 @dataclass
@@ -37,6 +56,7 @@ def run_gold(
     dbname: str,
     user: str,
     password: str,
+    file_name: str | None = None,
 ) -> GoldRunResult:
     env = os.environ.copy()
     env.update(
@@ -51,6 +71,9 @@ def run_gold(
             "DBT_STAGE_TABLE": spec.stage.table,
         }
     )
+    as_of_date = _extract_as_of_date(file_name)
+    if as_of_date:
+        env["DBT_AS_OF_DATE"] = as_of_date
 
     cmd = [
         sys.executable,

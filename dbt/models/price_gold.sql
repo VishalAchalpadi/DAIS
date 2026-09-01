@@ -2,11 +2,19 @@
 -- volume, and total price return over the period covered by stage
 -- ((last Close - first Close) / first Close, ordered by Date).
 --
+-- as_of_date is NOT derived from stage data - it's the date embedded in
+-- the SOURCE FILE NAME that triggered this run (e.g.
+-- portfolio_prices_20260830.csv -> 2026-08-30), passed in via the
+-- DBT_AS_OF_DATE env var by medallion/gold.py. Falls back to
+-- current_date if unset (e.g. a quarantine-resubmit-triggered gold
+-- refresh, which has no single source file).
+--
 -- SCD Type 2 (see specs/price_ingest.yaml's gold.scd_type/scd_key and
--- dbt/macros/dais_scd2.sql): every time avg_volume/total_return change
--- for a ticker, a new version is added rather than overwriting the old
--- one - active_flag=true marks the current version, expiry_datetime is
--- set on whichever version got superseded.
+-- dbt/macros/dais_scd2.sql): as_of_date is a TRACKED column alongside
+-- avg_volume/total_return, so every run against a new file's date adds
+-- a new version for every ticker (even if the computed values happen
+-- to match) - active_flag=true marks the current version,
+-- expiry_datetime is set on whichever version got superseded.
 
 {{
   config(
@@ -54,10 +62,11 @@ current_snapshot as (
     select
         fl."Ticker" as ticker,
         av.avg_volume,
-        (fl.last_close - fl.first_close) / fl.first_close as total_return
+        (fl.last_close - fl.first_close) / fl.first_close as total_return,
+        coalesce(cast(nullif('{{ env_var("DBT_AS_OF_DATE", "") }}', '') as date), current_date) as as_of_date
     from first_last_close fl
     join avg_volume_cte av on av."Ticker" = fl."Ticker"
 
 )
 
-{{ dais_scd2('current_snapshot', ['ticker'], ['avg_volume', 'total_return']) }}
+{{ dais_scd2('current_snapshot', ['ticker'], ['avg_volume', 'total_return', 'as_of_date']) }}

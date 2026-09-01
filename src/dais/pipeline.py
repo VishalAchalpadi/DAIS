@@ -161,7 +161,7 @@ def run_pipeline(
     gold_target = f"{spec.gold.schema_}.{spec.gold.dbt_select}"
     handle = monitor.begin_step(run_id, spec.pipeline_name, "gold", gold_target)
     emitter.start("gold", run_id, inputs=[stage_target], outputs=[gold_target])
-    gold_result = run_gold(spec, **connection_params)
+    gold_result = run_gold(spec, file_name=file_name, **connection_params)
 
     if not gold_result.success:
         monitor.fail_step(handle, row_count_in=stage_result.row_count_out, row_count_out=0)
