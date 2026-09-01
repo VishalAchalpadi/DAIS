@@ -88,7 +88,7 @@ quality:
     - column: as_of_date
       checks: [not_null, valid_date]
       cast_to: date
-      format: "%Y-%m-%d"
+      format: "%m/%d/%Y"
     - column: total_net_assets
       checks: [not_null, is_numeric, greater_than_or_equal: 0]
       cast_to: decimal
