@@ -227,3 +227,38 @@ def test_group_level_with_group_by_accepted():
     spec = PipelineSpec.model_validate(data)
     assert spec.quality.integrity_mode == "group_level"
     assert spec.quality.quarantine.group_by == ["account_id"]
+
+
+# ---------------------------------------------------------------------------
+# gold.scd_type: 2, requires gold.scd_key
+# ---------------------------------------------------------------------------
+
+def test_scd_type_without_scd_key_rejected():
+    data = _load_dict(VALID_SPEC)
+    data["gold"]["scd_type"] = 2
+    with pytest.raises(ValidationError, match="scd_key is required"):
+        PipelineSpec.model_validate(data)
+
+
+def test_scd_key_without_scd_type_rejected():
+    data = _load_dict(VALID_SPEC)
+    data["gold"]["scd_key"] = ["account_id"]
+    with pytest.raises(ValidationError, match="only used when gold.scd_type"):
+        PipelineSpec.model_validate(data)
+
+
+def test_scd_type_with_scd_key_accepted():
+    data = _load_dict(VALID_SPEC)
+    data["gold"]["scd_type"] = 2
+    data["gold"]["scd_key"] = ["account_id"]
+    spec = PipelineSpec.model_validate(data)
+    assert spec.gold.scd_type == 2
+    assert spec.gold.scd_key == ["account_id"]
+
+
+def test_scd_type_only_accepts_2():
+    data = _load_dict(VALID_SPEC)
+    data["gold"]["scd_type"] = 1
+    data["gold"]["scd_key"] = ["account_id"]
+    with pytest.raises(ValidationError):
+        PipelineSpec.model_validate(data)

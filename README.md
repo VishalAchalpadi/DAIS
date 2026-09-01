@@ -234,6 +234,38 @@ really "pick a format independently of a target," it's "write via Iceberg."
 `catalog`/`table`/`location` become required (non-placeholder) the moment
 `enabled: true`.
 
+### `gold.scd_type` / `gold.scd_key` - SCD Type 2 in the gold layer
+
+| Value | Behavior |
+|---|---|
+| *(omitted)* | Default. The gold model fully replaces its output on every run (whatever the model's own SQL/materialization does) - no history kept. |
+| `scd_type: 2` | Documents that this gold model versions every change instead of overwriting it - requires `scd_key` (the business/natural key column(s) identifying "the same row" across versions, e.g. `["ticker"]`). |
+
+This field is **discoverability metadata for the spec, not something DAIS's
+Python layer enforces at runtime** - same boundary as any other gold
+transformation: dbt/SQL owns the actual logic, Python only decides *when*
+`dbt run` happens. The real mechanics live in the reusable
+`dbt/macros/dais_scd2.sql` macro, which any gold model can call from inside a
+`with <current_snapshot_cte> as (...)  {{ dais_scd2(cte_name, unique_key,
+tracked_columns) }}` chain (`dbt/models/price_gold.sql` is the reference
+example) - it materializes the model as `incremental` and produces:
+
+| Output column | Meaning |
+|---|---|
+| *(the `unique_key` and `tracked_columns` you passed in)* | The business columns being versioned - unchanged from a normal gold model. |
+| `version` | 1, 2, 3... per business key - increments each time a tracked column's value changes. |
+| `effective_datetime` | When this version became active. |
+| `expiry_datetime` | When this version was superseded - `NULL` while still active. |
+| `active_flag` | `true` for exactly one row per business key - the current version. |
+| `scd_pk` | **Primary key of the table** - `md5(business_key + version)`. The business key alone isn't unique (it repeats once per version), so this is what `unique_key` in the model's `config()` points at, and what dbt's incremental strategy uses to update an expiring row in place rather than duplicating it. |
+
+A run where nothing changed for a key touches nothing; a run where a tracked
+column changed adds one new active row and expires the previous one in
+place (`UPDATE`-like, via dbt's `unique_key`-keyed incremental strategy) -
+verified live: changing `price_stage.Volume` for one ticker and rerunning
+`dbt run` produced exactly one new `version: 2` row and expired `version: 1`
+for that ticker, with the other 26 tickers untouched.
+
 ### `resilience.retry.backoff`
 
 | Value | Behavior |

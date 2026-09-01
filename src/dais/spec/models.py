@@ -328,8 +328,25 @@ class GoldConfig(StrictModel):
     dbt_project: str
     dbt_select: str
     exports: list[ExportConfig] = Field(default_factory=list)
+    # SCD Type 2: the dbt model tracks every version of a row rather than
+    # overwriting it, via active_flag/effective_datetime/expiry_datetime/
+    # version columns - see dbt/macros/dais_scd2.sql. This field is
+    # documentation/discoverability for the spec (which columns identify
+    # a "row" for versioning purposes), not something DAIS's Python layer
+    # enforces at runtime - the model's own SQL is what actually
+    # implements it, same as any other gold transformation.
+    scd_type: Literal[2] | None = None
+    scd_key: list[str] | None = None
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _scd_type_requires_scd_key(self) -> "GoldConfig":
+        if self.scd_type is not None and not self.scd_key:
+            raise ValueError("gold.scd_key is required when gold.scd_type is set")
+        if self.scd_type is None and self.scd_key:
+            raise ValueError("gold.scd_key is only used when gold.scd_type is set")
+        return self
 
 
 # ---------------------------------------------------------------------------

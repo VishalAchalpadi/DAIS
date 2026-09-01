@@ -138,16 +138,21 @@ stage:
   write_mode: upsert
 
 # ------------------------------------------------------------------------
-# GOLD layer - one row per ticker: average trading volume and total price
-# return ((last Close - first Close) / first Close) over the period
-# covered by stage. Fewer rows than stage (one per ticker, not one per
-# ticker-date) and a different column set (ticker, avg_volume,
-# total_return, gold_loaded_at).
+# GOLD layer - one row per ticker VERSION: average trading volume and
+# total price return ((last Close - first Close) / first Close) over
+# the period covered by stage. SCD Type 2 - a ticker's avg_volume or
+# total_return changing on a later run adds a new version rather than
+# overwriting the old one (dbt/macros/dais_scd2.sql). Columns: ticker,
+# avg_volume, total_return, version, effective_datetime,
+# expiry_datetime, active_flag, scd_pk (primary key - a hash of
+# scd_key + version, since the natural key repeats across versions).
 # ------------------------------------------------------------------------
 gold:
   schema: core
   dbt_project: "dbt/"
   dbt_select: "price_gold"
+  scd_type: 2
+  scd_key: ["ticker"]
 
 # ------------------------------------------------------------------------
 # Resilience - applies to all Postgres/S3/API calls in this pipeline
