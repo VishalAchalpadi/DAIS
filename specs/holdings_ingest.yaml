@@ -215,3 +215,19 @@ resilience:
 lineage:
   namespace: "datamesh-prod"
   job_name: holdings_ingest
+
+# ------------------------------------------------------------------------
+# Anomaly detection (Phase 8b) - compares this run's profile against its
+# own trailing history (see src/dais/ai/). alert, not quarantine: a
+# reference example should surface an unusual run for a human to look at,
+# not silently start blocking a real pipeline's promotion to gold the
+# moment this block is added - switch to on_anomaly: quarantine once
+# you've watched it alert a few times and trust the thresholds.
+# ------------------------------------------------------------------------
+anomaly_detection:
+  enabled: true
+  metrics: ["row_count", "market_value_sum", "quantity_avg"]
+  method: zscore
+  threshold: 3.0
+  window: 20
+  on_anomaly: alert

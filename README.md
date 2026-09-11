@@ -427,6 +427,56 @@ ANTHROPIC_API_KEY=sk-ant-... dais-recommend-dq \
   rationale and confidence - the same review discipline as any other
   spec change.
 
+## Anomaly detection (`anomaly_detection` in a spec)
+
+Unlike the DQ recommender, this runs as part of a normal pipeline execution
+- it's the one place Phase 8 touches existing runtime behavior
+(`pipeline.py`), and only as a small, additive branch: a pipeline with no
+`anomaly_detection` block behaves byte-for-byte identically to before.
+
+```yaml
+anomaly_detection:
+  enabled: true
+  metrics: ["row_count", "market_value_sum", "quantity_avg"]  # spec-driven
+  method: zscore              # zscore | pct_change
+  threshold: 3.0               # 3 standard deviations, or e.g. 0.20 for pct_change
+  window: 20                   # trailing prior runs compared against
+  on_anomaly: alert            # alert | quarantine
+```
+
+- **Metric names**: `row_count`, or `<column>_<aggregation>` where aggregation
+  is `sum`/`avg`/`null_rate`/`distinct_count` - entirely spec-driven, computed
+  generically off whichever columns you name (`src/dais/ai/profiler.py`),
+  never hardcoded to one pipeline's schema.
+- **Detection method**: z-score or percent-change against the metric's own
+  trailing mean over the last `window` runs for that pipeline - deliberately
+  simple and explainable, never an opaque ML model
+  (`src/dais/ai/anomaly_detector.py`). A pipeline's first couple of runs are
+  never flagged - there isn't enough history yet to judge anything.
+- **History table**: every run with `anomaly_detection.enabled: true` writes
+  one row to `control.data_profile_history` (same idempotent-DDL pattern as
+  raw/stage) - `row_count` as its own column, everything else as a JSONB
+  metrics blob.
+- **`on_anomaly: alert`** (default): logs/webhooks an alert - through the
+  *same* alerter already used for DQ and control-gate failures
+  (`quality/dq_alerts.py`, `quality.quarantine.alert.channel`/`destination` -
+  no second alerting path) - but never blocks the run.
+- **`on_anomaly: quarantine`**: on a flagged anomaly, the run stops exactly
+  like a strict DQ failure - `status: quarantined`, gold never runs. The data
+  already reached stage (profiling needs it there), so `layer_reached` is
+  `"stage"`, not `"raw"`.
+- **Explanation**: when something is flagged, Claude is asked for a short
+  plain-language explanation of the flagged metric, its current value, and
+  its trailing baseline (`src/dais/ai/anomaly_explainer.py`) - it's told to
+  describe only what the numbers show, never speculate about a root cause
+  the data doesn't support. This is best-effort: if the explanation call
+  fails for any reason, the alert/quarantine still fires with the raw
+  numbers, just without the extra sentence.
+- **Tuning workflow**: start with `on_anomaly: alert` on a new metric until
+  you've seen it fire a few times and trust the threshold for that
+  pipeline's real variance, then switch to `on_anomaly: quarantine` once
+  you're confident a flagged run genuinely shouldn't be promoted.
+
 ## Known scope decisions / limitations
 
 A few things were deliberately scoped down rather than left half-built:

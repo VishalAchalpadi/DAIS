@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
+from dais.ai.anomaly_detector import detect_anomalies, get_trailing_profiles, write_profile_history
+from dais.ai.profiler import compute_profile
 from dais.execution import layers_to_run
 from dais.lineage.emitter import LineageEmitter, build_emitter
 from dais.medallion.bronze import land_raw
@@ -18,6 +21,7 @@ from dais.monitoring.process_monitor import ProcessMonitor
 from dais.parsers import get_parser
 from dais.parsers.fixed_width_parser import parse_fixed_width_chunked
 from dais.quality.control_gates import run_control_gates
+from dais.quality.dq_alerts import get_alerter
 from dais.quality.file_validator import (
     enforce_integrity_mode,
     raise_alert,
@@ -153,6 +157,66 @@ def run_pipeline(
     stage_result = land_stage(outcome.promoted_df, spec, connector)
     monitor.complete_step(handle, row_count_in=parsed_df.height, row_count_out=stage_result.row_count_out)
     emitter.complete("stage", run_id, outputs=[stage_target])
+
+    # --- anomaly detection (Phase 8b, additive/optional) - a no-op for
+    # any pipeline that doesn't declare anomaly_detection in its spec ---
+    if spec.anomaly_detection is not None and spec.anomaly_detection.enabled:
+        profile = compute_profile(outcome.promoted_df, spec.anomaly_detection.metrics)
+        trailing_profiles = get_trailing_profiles(
+            connector, spec.pipeline_name, spec.anomaly_detection.window, exclude_process_id=run_id
+        )
+        anomalies = [
+            a for a in detect_anomalies(profile, trailing_profiles, spec.anomaly_detection) if a.is_anomaly
+        ]
+        write_profile_history(
+            connector,
+            process_id=run_id,
+            pipeline_name=spec.pipeline_name,
+            run_date=datetime.now(timezone.utc).date(),
+            profile=profile,
+        )
+
+        if anomalies:
+            explanations: dict[str, str] = {}
+            try:
+                import anthropic
+
+                from dais.ai.anomaly_explainer import explain_anomalies
+
+                explanations = explain_anomalies(anthropic.Anthropic(), anomalies, pipeline_name=spec.pipeline_name)
+            except Exception:
+                pass  # the explanation is best-effort - never block an alert/quarantine on it
+
+            alerter = get_alerter(spec.quality.quarantine.alert.channel)
+            for a in anomalies:
+                message = (
+                    f"{spec.pipeline_name}: anomaly detected in {a.metric} (current={a.current_value}, "
+                    f"baseline_mean={a.baseline_mean:.4f}, {a.method} score={a.score:.3f}, "
+                    f"threshold={a.threshold})"
+                )
+                if a.metric in explanations:
+                    message += f" - {explanations[a.metric]}"
+                alerter.send(
+                    spec.quality.quarantine.alert.destination,
+                    message,
+                    {"pipeline_name": spec.pipeline_name, "metric": a.metric, "score": a.score},
+                )
+
+            if spec.anomaly_detection.on_anomaly == "quarantine":
+                monitor.quarantine_step(handle, row_count_in=parsed_df.height, row_count_out=stage_result.row_count_out)
+                emitter.fail("stage", run_id)
+                return PipelineRunResult(
+                    run_id=run_id,
+                    status="quarantined",
+                    layer_reached="stage",
+                    checksum=raw_result.checksum,
+                    quarantine_location=quarantine_location,
+                    error=f"{len(anomalies)} anomaly(ies) detected: {', '.join(a.metric for a in anomalies)}",
+                    failure_reasons=[
+                        f"{a.metric}: {a.method} score {a.score:.3f} exceeds threshold {a.threshold}"
+                        for a in anomalies
+                    ],
+                )
 
     if "gold" not in layers:
         return PipelineRunResult(

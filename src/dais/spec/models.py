@@ -376,6 +376,40 @@ class LineageConfig(StrictModel):
 
 
 # ---------------------------------------------------------------------------
+# anomaly detection (Phase 8b) - optional, additive. Metric names are
+# either "row_count" or "<column>_<aggregation>" (sum/avg/null_rate/
+# distinct_count) - spec-driven, never a hardcoded column list, so this
+# works generically for any pipeline. See src/dais/ai/profiler.py and
+# src/dais/ai/anomaly_detector.py for the implementation - this model
+# only declares and validates the config shape.
+# ---------------------------------------------------------------------------
+
+_ANOMALY_METRIC_SUFFIXES = ("_sum", "_avg", "_null_rate", "_distinct_count")
+
+
+class AnomalyDetectionConfig(StrictModel):
+    enabled: bool = True
+    metrics: list[str] = Field(min_length=1)
+    method: Literal["zscore", "pct_change"]
+    threshold: float = Field(gt=0)
+    window: int = Field(ge=2, default=20)
+    on_anomaly: Literal["alert", "quarantine"] = "alert"
+
+    @field_validator("metrics")
+    @classmethod
+    def _validate_metric_names(cls, metrics: list[str]) -> list[str]:
+        for metric in metrics:
+            if metric == "row_count":
+                continue
+            if not any(metric.endswith(suffix) for suffix in _ANOMALY_METRIC_SUFFIXES):
+                raise ValueError(
+                    f"unsupported anomaly_detection metric {metric!r}; must be 'row_count' "
+                    f"or a column name ending in one of {_ANOMALY_METRIC_SUFFIXES}"
+                )
+        return metrics
+
+
+# ---------------------------------------------------------------------------
 # top-level spec
 # ---------------------------------------------------------------------------
 
@@ -397,6 +431,7 @@ class PipelineSpec(StrictModel):
     gold: GoldConfig
     resilience: ResilienceConfig
     lineage: LineageConfig
+    anomaly_detection: AnomalyDetectionConfig | None = None
 
     _v_owner = field_validator("owner")(_reject_placeholder)
 

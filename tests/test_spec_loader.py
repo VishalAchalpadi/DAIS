@@ -194,6 +194,81 @@ def test_quarantine_kind_local_rejects_s3_uri():
         PipelineSpec.model_validate(data)
 
 
+# ---------------------------------------------------------------------------
+# anomaly_detection (Phase 8b) - optional, additive
+# ---------------------------------------------------------------------------
+
+def _valid_anomaly_block(**overrides):
+    block = {"enabled": True, "metrics": ["row_count"], "method": "zscore", "threshold": 3.0, "window": 20}
+    block.update(overrides)
+    return block
+
+
+def test_anomaly_detection_is_optional_and_absent_by_default():
+    data = _load_dict(VALID_SPEC)
+    spec = PipelineSpec.model_validate(data)
+    assert spec.anomaly_detection is None
+
+
+def test_anomaly_detection_valid_block_accepted():
+    data = _load_dict(VALID_SPEC)
+    data["anomaly_detection"] = _valid_anomaly_block()
+    spec = PipelineSpec.model_validate(data)
+    assert spec.anomaly_detection.enabled is True
+    assert spec.anomaly_detection.on_anomaly == "alert"  # default
+
+
+def test_anomaly_detection_on_anomaly_quarantine_accepted():
+    data = _load_dict(VALID_SPEC)
+    data["anomaly_detection"] = _valid_anomaly_block(on_anomaly="quarantine")
+    spec = PipelineSpec.model_validate(data)
+    assert spec.anomaly_detection.on_anomaly == "quarantine"
+
+
+def test_anomaly_detection_rejects_unknown_metric_shape():
+    data = _load_dict(VALID_SPEC)
+    data["anomaly_detection"] = _valid_anomaly_block(metrics=["market_value_median"])
+    with pytest.raises(ValidationError, match="unsupported anomaly_detection metric"):
+        PipelineSpec.model_validate(data)
+
+
+def test_anomaly_detection_accepts_column_suffixed_metrics():
+    data = _load_dict(VALID_SPEC)
+    data["anomaly_detection"] = _valid_anomaly_block(
+        metrics=["row_count", "market_value_sum", "quantity_avg", "currency_null_rate", "currency_distinct_count"]
+    )
+    spec = PipelineSpec.model_validate(data)
+    assert len(spec.anomaly_detection.metrics) == 5
+
+
+def test_anomaly_detection_rejects_unknown_method():
+    data = _load_dict(VALID_SPEC)
+    data["anomaly_detection"] = _valid_anomaly_block(method="linear_regression")
+    with pytest.raises(ValidationError):
+        PipelineSpec.model_validate(data)
+
+
+def test_anomaly_detection_rejects_unknown_on_anomaly_value():
+    data = _load_dict(VALID_SPEC)
+    data["anomaly_detection"] = _valid_anomaly_block(on_anomaly="ignore")
+    with pytest.raises(ValidationError):
+        PipelineSpec.model_validate(data)
+
+
+def test_anomaly_detection_requires_at_least_one_metric():
+    data = _load_dict(VALID_SPEC)
+    data["anomaly_detection"] = _valid_anomaly_block(metrics=[])
+    with pytest.raises(ValidationError):
+        PipelineSpec.model_validate(data)
+
+
+def test_anomaly_detection_threshold_must_be_positive():
+    data = _load_dict(VALID_SPEC)
+    data["anomaly_detection"] = _valid_anomaly_block(threshold=0)
+    with pytest.raises(ValidationError):
+        PipelineSpec.model_validate(data)
+
+
 def test_quarantine_kind_local_with_local_path_accepted():
     data = _load_dict(VALID_SPEC)
     data["quality"]["quarantine"]["kind"] = "local"
