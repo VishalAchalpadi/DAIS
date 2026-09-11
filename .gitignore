@@ -19,3 +19,7 @@ dbt/.user.yml
 
 # local sample source files used for manual/CLI runs
 data/
+
+# dais-recommend-dq draft output - a per-run human-review artifact, never
+# a durable spec; promoting a suggestion means hand-editing the real spec
+specs/*.dq_suggestions.yaml

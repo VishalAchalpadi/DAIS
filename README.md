@@ -387,6 +387,46 @@ Docker, neither of which is set up here); the file's docstring covers the
 Airflow Connection/Variable setup needed to actually run it once you have an
 Airflow instance to drop it into.
 
+## AI-assisted DQ rule recommendation (`dais-recommend-dq`)
+
+An offline authoring aid, not a pipeline feature - it is never invoked as
+part of a normal pipeline run, and it never writes to a live spec.
+
+Given a sample of a pipeline's data, it asks Claude to draft
+`quality.rules`-shaped suggestions - reusing the real `QualityRule` pydantic
+model from `spec/models.py`, not a parallel schema - each with a
+plain-language rationale and a `high`/`medium`/`low` confidence level, so a
+human reviewer knows what to scrutinize most.
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... dais-recommend-dq \
+  --spec specs/holdings_ingest.yaml \
+  --sample-size 500
+# wrote 4 suggestion(s) to specs/holdings_ingest.dq_suggestions.yaml
+```
+
+- **Sampling**: pulls a random sample from the pipeline's raw table if it
+  exists (`SELECT ... ORDER BY random() LIMIT n`); pass `--file path/to/sample`
+  to sample from a local file instead (via the pipeline's own configured
+  parser) - useful when drafting a brand-new spec before the pipeline has
+  ever run.
+- **Structured, validated output**: the model's response is forced into a
+  tool call whose schema is generated directly from the real pydantic
+  models - if the response fails validation, the validation error is fed
+  back to the model and it gets one retry before the command fails loudly.
+  It never silently accepts malformed output.
+- **Never a `lookup` rule**: the model has no visibility into what
+  reference tables actually exist in this deployment, so it never proposes
+  SQL reference-data validation - only checks inferable from the sample
+  itself.
+- **Review-and-promote workflow**: output always lands in a sibling
+  `<pipeline>.dq_suggestions.yaml` file next to the real spec - it is a
+  draft for a human to read, never auto-merged or auto-applied. Promoting a
+  suggestion means manually copying the `rule:` block into the real
+  `quality.rules` list in `specs/<pipeline>.yaml` once you've reviewed the
+  rationale and confidence - the same review discipline as any other
+  spec change.
+
 ## Known scope decisions / limitations
 
 A few things were deliberately scoped down rather than left half-built:

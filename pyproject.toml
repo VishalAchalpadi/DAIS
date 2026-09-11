@@ -26,10 +26,13 @@ dependencies = [
     "boto3>=1.34",
     "structlog>=24.1",
     "sqllineage>=1.5",
+    "anthropic>=0.40",
+    "scipy>=1.11",
 ]
 
 [project.scripts]
 dais = "dais.cli:main"
+dais-recommend-dq = "dais.ai.dq_recommender:main"
 
 [project.optional-dependencies]
 dev = [
