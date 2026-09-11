@@ -29,6 +29,10 @@ dependencies = [
     "sqllineage>=1.5",
     "anthropic>=0.40",
     "scipy>=1.11",
+    "dagster>=1.8",
+    "dagster-webserver>=1.8",
+    "dagster-dbt>=0.24",
+    "requests>=2.31",
 ]
 
 [project.scripts]

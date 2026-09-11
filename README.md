@@ -615,6 +615,80 @@ real emitted event confirmed to carry the configured namespace and list
 `int_portfolio_positions` (the gold mart's upstream intermediate model) as
 an input.
 
+## Dagster orchestration (Phase 9c, `src/dais/orchestration/dagster/`)
+
+Dagster is a second, optional trigger source alongside Control-M - never a
+second execution path. Whichever one kicks off a run,
+`control.process_monitor` (written inside `dais.pipeline`, untouched by any
+of this) remains the single source of truth for run status.
+
+- **Raw/stage** ([`ingest_assets.py`](src/dais/orchestration/dagster/ingest_assets.py)):
+  one asset per ingest pipeline, `key=AssetKey([pipeline_name, "stage"])`.
+  Materializing it calls the *existing* HTTP API
+  (`POST /pipelines/{name}/run`, then polls `GET /pipelines/runs/{id}/status`)
+  - the same trigger/poll surface Control-M's shell wrapper already uses.
+  Ingestion logic itself (parsing, control gates, quality, quarantine)
+  stays entirely in `dais.pipeline`; this asset is a black-box caller.
+- **Gold** ([`gold_assets.py`](src/dais/orchestration/dagster/gold_assets.py)):
+  one `dagster-dbt` `@dbt_assets` group per `gold_builds/*.yaml` spec,
+  scoped by that spec's own `dbt.select` tag selector (Phase 9a's tagging
+  convention) against the SAME shared `dbt/` project - not a copy, not a
+  separate manifest per build.
+- **Discovery, not hardcoding**: `definitions.py` scans `gold_builds/*.yaml`
+  for its dbt asset groups, and derives the set of ingest assets to build
+  from the union of every build's `depends_on` - adding a new gold build
+  wires up its upstream ingest assets automatically.
+- **A connected graph, not two disconnected halves**: `dbt/models/sources.yml`'s
+  source name is already each pipeline's name (Phase 9a's convention), so a
+  custom `DagsterDbtTranslator` maps dbt `source()` nodes to
+  `AssetKey([source_name, "stage"])` - exactly the ingest assets' own keys.
+  No separate mapping table; `int_portfolio_positions`'s dependency on
+  `holdings_ingest/stage` shows up as one real edge, not two coincidentally-named
+  nodes.
+
+### Two dbt-invocation wrinkles, both already familiar from Phase 9b
+
+- `DbtProject`'s own manifest-generation step (`dbt parse`, used to build
+  the asset graph) shells out via its own internal `DbtCliResource` using
+  `shutil.which("dbt")` - no override parameter, unlike the `@dbt_assets`
+  function's own `DbtCliResource`, which DOES accept `dbt_executable=`.
+  `dbt_project.py` prepends the interpreter's own `Scripts/` directory
+  (a real `dbt.exe` from `dbt-core`/`dbt-postgres`) to `PATH` at import
+  time so this resolves regardless of whether the venv was activated
+  before `dagster dev` was launched - the same reasoning as Phase 9b's
+  `dbt-ol` PATH fix, verified against this machine's history of
+  Application Control policies blocking pip-regenerated `.exe` wrappers.
+- `dbt/profiles.yml` has no `env_var()` defaults on host/port/user/etc
+  (unlike the legacy `gold:` models' Jinja, Phase 9a) - `dbt parse` still
+  needs *some* value to resolve the profile, even though parsing never
+  opens a real connection. `dbt_project.py` sets harmless placeholders for
+  manifest generation only; `gold_assets.py` resolves the REAL credentials
+  (via the same `get_secrets_provider()` every other connection in DAIS
+  uses) and sets them immediately before the actual `dbt run`.
+
+### Running the UI locally
+
+```
+dagster dev -f src/dais/orchestration/dagster/definitions.py
+```
+
+Starts the webserver (`dagster-webserver`, a FastAPI/Uvicorn app) at
+`localhost:3000` and a daemon for schedules/sensors. You'll see the full
+asset graph - `holdings_ingest/stage` and `asset_ingest/stage` feeding into
+`stg_holdings`/`stg_asset` -> `int_portfolio_positions` ->
+`portfolio_summary_gold` - materializable end to end from the UI.
+`DaisApiResource` needs `DAIS_API_KEY` set to match whatever the DAIS API
+server was started with, and the API server itself needs to be running
+separately (`uvicorn dais.api.app:create_app --factory`) - Dagster never
+starts it, matching the black-box design above.
+
+`tests/test_dagster_orchestration.py` verifies the wiring (asset graph
+shape, source-to-ingest-asset key mapping) and, separately, two real
+end-to-end runs with no mocks: `holdings_ingest`/`asset_ingest` materialized
+through a real `uvicorn` server hitting the real API, and
+`portfolio_summary_gold` materialized through a real `dbt run` via
+`dagster-dbt`.
+
 ## Known scope decisions / limitations
 
 A few things were deliberately scoped down rather than left half-built:
