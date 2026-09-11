@@ -1,0 +1,43 @@
+# =========================================================================
+# Gold Build Spec: portfolio_summary_gold
+#
+# Phase 9a reference example. Combines two ingest pipelines' stage
+# tables (multi-source, hence its own spec type rather than nested in
+# either pipeline's gold: block): rolls holdings_ingest's security-level
+# positions up to portfolio/date, then reconciles against
+# asset_ingest's independently-reported NAV for the same portfolio/date.
+#
+# The prompt's original example (trade_blotter_gold, depending on
+# trade_blotter_ingest/fx_rates_ingest) referenced pipelines that don't
+# exist in this project - this uses the same structural pattern
+# (staging/intermediate/marts, tagging, depends_on, source()) against
+# holdings_ingest + asset_ingest, which are real, running pipelines
+# with real stage data to demo against.
+# =========================================================================
+
+gold_build_name: portfolio_summary_gold
+description: "Reconciles holdings-ingest position rollups against asset-ingest reported NAV, per portfolio/date"
+owner: "data-eng-team"
+
+# Which ingest pipelines' stage tables this build reads from - declared
+# here, not inferred from dbt ref()/source() calls, so orchestration and
+# SLA tooling can reason about it without parsing SQL.
+depends_on:
+  - holdings_ingest
+  - asset_ingest
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+dbt:
+  project_dir: "dbt/"
+  select: "tag:portfolio_summary_gold"
+
+target:
+  schema: core
+  primary_table: portfolio_summary_gold
+
+sla:
+  complete_by: "07:30"
+  timezone: "America/New_York"

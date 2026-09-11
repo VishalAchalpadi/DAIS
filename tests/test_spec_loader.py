@@ -278,6 +278,35 @@ def test_quarantine_kind_local_with_local_path_accepted():
 
 
 # ---------------------------------------------------------------------------
+# gold: is now optional (Phase 9a - gold logic can live in a
+# gold_builds/*.yaml instead), as long as execution.stop_after isn't "gold"
+# ---------------------------------------------------------------------------
+
+def test_gold_block_optional_when_stop_after_is_stage():
+    data = _load_dict(VALID_SPEC)
+    data["execution"]["stop_after"] = "stage"
+    del data["gold"]
+    spec = PipelineSpec.model_validate(data)
+    assert spec.gold is None
+
+
+def test_gold_block_still_required_when_stop_after_is_gold():
+    data = _load_dict(VALID_SPEC)
+    data["execution"]["stop_after"] = "gold"
+    del data["gold"]
+    with pytest.raises(ValidationError, match="no gold: block"):
+        PipelineSpec.model_validate(data)
+
+
+def test_existing_specs_with_gold_block_unaffected():
+    # backward compatibility: a spec that already has gold: + stop_after: gold
+    # continues to validate exactly as before
+    data = _load_dict(VALID_SPEC)
+    spec = PipelineSpec.model_validate(data)
+    assert spec.gold is not None
+
+
+# ---------------------------------------------------------------------------
 # quality.integrity_mode: group_level, requires quality.quarantine.group_by
 # ---------------------------------------------------------------------------
 

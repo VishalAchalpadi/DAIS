@@ -428,10 +428,24 @@ class PipelineSpec(StrictModel):
     raw: RawConfig
     quality: QualityConfig
     stage: StageConfig
-    gold: GoldConfig
+    # Optional as of Phase 9a: a new pipeline whose gold logic lives in a
+    # gold_builds/*.yaml (GoldBuildSpec, below) instead of nested here
+    # simply omits this block - existing pipelines keep it and are
+    # completely unaffected. If omitted, execution.stop_after must not
+    # be "gold" (there is nothing here to run).
+    gold: GoldConfig | None = None
     resilience: ResilienceConfig
     lineage: LineageConfig
     anomaly_detection: AnomalyDetectionConfig | None = None
+
+    @model_validator(mode="after")
+    def _stop_after_gold_requires_gold_block(self) -> "PipelineSpec":
+        if self.execution.stop_after == "gold" and self.gold is None:
+            raise ValueError(
+                "execution.stop_after is 'gold' but this spec has no gold: block - "
+                "either add one or lower stop_after to 'stage'"
+            )
+        return self
 
     _v_owner = field_validator("owner")(_reject_placeholder)
 
@@ -446,3 +460,54 @@ class PipelineSpec(StrictModel):
         if v.type == "fixed_width" and not v.columns:
             raise ValueError("parser.columns is required when parser.type is fixed_width")
         return v
+
+
+# ---------------------------------------------------------------------------
+# gold_builds/*.yaml (Phase 9a) - gold-layer business logic that spans
+# multiple ingest pipelines' stage tables, as its own spec type rather
+# than nested inside a single pipeline's gold: block. depends_on is
+# declared explicitly (not inferred from dbt ref()/source() calls) so
+# orchestration/SLA tooling can reason about it without parsing SQL.
+# ---------------------------------------------------------------------------
+
+class GoldBuildDatabaseConfig(StrictModel):
+    platform: Literal["postgres", "snowflake"]
+    connection: str
+
+    _v_connection = field_validator("connection")(_reject_placeholder)
+
+
+class GoldBuildDbtConfig(StrictModel):
+    project_dir: str
+    select: str  # e.g. "tag:trade_blotter_gold" - scopes to this build's models only
+
+
+class GoldBuildTargetConfig(StrictModel):
+    schema_: str = Field(alias="schema")
+    # The table(s) actually produced are whatever `dbt.select` materializes;
+    # this is documentation/visibility only, not enforced against dbt's
+    # output.
+    primary_table: str
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class GoldBuildSlaConfig(StrictModel):
+    complete_by: str
+    timezone: str
+
+    _v_complete_by = field_validator("complete_by")(_reject_placeholder)
+    _v_timezone = field_validator("timezone")(_reject_placeholder)
+
+
+class GoldBuildSpec(StrictModel):
+    gold_build_name: str
+    description: str
+    owner: str
+    depends_on: list[str] = Field(min_length=1)
+    database: GoldBuildDatabaseConfig
+    dbt: GoldBuildDbtConfig
+    target: GoldBuildTargetConfig
+    sla: GoldBuildSlaConfig | None = None
+
+    _v_owner = field_validator("owner")(_reject_placeholder)

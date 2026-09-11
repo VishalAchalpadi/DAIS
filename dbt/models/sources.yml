@@ -1,0 +1,36 @@
+# One source entry per ingest pipeline's stage table (Phase 9a). A gold
+# build's dbt models reference upstream data via source(), e.g.
+# {{ source('holdings_ingest', 'stage') }} - keeping the dbt-level
+# dependency explicit and consistent with a gold_builds/*.yaml's
+# depends_on field, rather than a bare cross-schema table reference.
+#
+# Schema/table names here match each pipeline's real stage.schema/
+# stage.table - same convention as any dbt sources.yml: static, not
+# resolved from the DAIS spec at dbt-run time (that's what depends_on
+# in gold_builds/*.yaml is for at the orchestration layer).
+version: 2
+
+sources:
+  - name: holdings_ingest
+    schema: data_in
+    tables:
+      - name: stage
+        identifier: holdings_stage
+
+  - name: asset_ingest
+    schema: data_in
+    tables:
+      - name: stage
+        identifier: asset_stage
+
+  - name: price_ingest
+    schema: data_in
+    tables:
+      - name: stage
+        identifier: price_stage
+
+  - name: benchmark_ingest
+    schema: data_in
+    tables:
+      - name: stage
+        identifier: benchmark_stage

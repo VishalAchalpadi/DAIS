@@ -18,6 +18,11 @@
 -- pair on a later run (e.g. a same-day correction file) -
 -- active_flag=true marks the current version of each pair,
 -- expiry_datetime is set on whichever version got superseded.
+--
+-- env_var() defaults (Phase 9a): see the matching note in asset_gold.sql
+-- - dbt parses every model in the shared project up front, so a
+-- gold_builds/*.yaml run needs these to have a default even though this
+-- model is never selected/executed in that case.
 
 {{
   config(
@@ -35,7 +40,7 @@ with ordered as (
         "Volume",
         row_number() over (partition by "Ticker" order by "Date" asc) as rn_first,
         row_number() over (partition by "Ticker" order by "Date" desc) as rn_last
-    from "{{ env_var('DBT_STAGE_SCHEMA') }}"."{{ env_var('DBT_STAGE_TABLE') }}"
+    from "{{ env_var('DBT_STAGE_SCHEMA', 'unused') }}"."{{ env_var('DBT_STAGE_TABLE', 'unused') }}"
 
 ),
 
@@ -55,7 +60,7 @@ avg_volume_cte as (
     select
         "Ticker",
         avg("Volume") as avg_volume
-    from "{{ env_var('DBT_STAGE_SCHEMA') }}"."{{ env_var('DBT_STAGE_TABLE') }}"
+    from "{{ env_var('DBT_STAGE_SCHEMA', 'unused') }}"."{{ env_var('DBT_STAGE_TABLE', 'unused') }}"
     group by "Ticker"
 
 ),

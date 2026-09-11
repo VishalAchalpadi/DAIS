@@ -11,6 +11,13 @@
 -- daily_aum_change_pct for a date already seen (e.g. a late-arriving
 -- correction file for an earlier date) - see specs/asset_ingest.yaml's
 -- gold.scd_type/scd_key and dbt/macros/dais_scd2.sql.
+--
+-- env_var() defaults (Phase 9a): dbt parses every model in this shared
+-- project before executing any --select subset, so a gold_builds/*.yaml
+-- run (which never sets DBT_STAGE_SCHEMA/TABLE - it uses source() and
+-- sources.yml instead) would otherwise fail at parse time on this
+-- model even though it's never selected/executed. The default is only
+-- ever read when this specific model isn't the one actually running.
 
 {{
   config(
@@ -24,7 +31,7 @@ with daily_aum as (
     select
         as_of_date,
         sum(total_net_assets_usd) as company_aum
-    from "{{ env_var('DBT_STAGE_SCHEMA') }}"."{{ env_var('DBT_STAGE_TABLE') }}"
+    from "{{ env_var('DBT_STAGE_SCHEMA', 'unused') }}"."{{ env_var('DBT_STAGE_TABLE', 'unused') }}"
     group by as_of_date
 
 ),

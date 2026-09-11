@@ -7,5 +7,11 @@
 -- dbt source(), since a spec's schema names aren't compile-time
 -- constants - the SAME database/connection as raw and stage, but the
 -- schema itself is spec-driven.
+--
+-- env_var() defaults (Phase 9a): dbt parses every model in this shared
+-- project before executing any --select subset, so a gold_builds/*.yaml
+-- run (which uses source()/sources.yml instead of these env vars) needs
+-- a default here even though this model is never selected/executed in
+-- that case.
 select *
-from "{{ env_var('DBT_STAGE_SCHEMA') }}"."{{ env_var('DBT_STAGE_TABLE') }}"
+from "{{ env_var('DBT_STAGE_SCHEMA', 'unused') }}"."{{ env_var('DBT_STAGE_TABLE', 'unused') }}"

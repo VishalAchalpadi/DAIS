@@ -477,6 +477,81 @@ anomaly_detection:
   pipeline's real variance, then switch to `on_anomaly: quarantine` once
   you're confident a flagged run genuinely shouldn't be promoted.
 
+## Gold builds spanning multiple pipelines (`gold_builds/*.yaml`)
+
+An ingest pipeline's inline `gold:` block is still fully supported (every
+existing pipeline keeps working unchanged), but it assumes gold logic reads
+from exactly *one* pipeline's stage table. Gold logic that genuinely spans
+several pipelines - a reconciliation mart, a multi-source blotter - gets its
+own spec type instead of being awkwardly nested inside one of them:
+
+```yaml
+# gold_builds/portfolio_summary_gold.yaml
+gold_build_name: portfolio_summary_gold
+description: "Reconciles holdings-ingest position rollups against asset-ingest reported NAV"
+owner: "data-eng-team"
+
+depends_on:            # which pipelines' stage tables this reads from -
+  - holdings_ingest     # declared explicitly, not inferred from dbt SQL,
+  - asset_ingest        # so orchestration/SLA tooling can reason about it
+                        # without parsing ref()/source() calls itself
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+dbt:
+  project_dir: "dbt/"
+  select: "tag:portfolio_summary_gold"   # scopes to exactly this build's models
+
+target:
+  schema: core
+  primary_table: portfolio_summary_gold  # documentation only, not enforced
+
+sla:
+  complete_by: "07:30"
+  timezone: "America/New_York"
+```
+
+Loaded via `dais.spec.loader.load_gold_build_spec(path)` into a
+`GoldBuildSpec`, and run via `dais.medallion.gold.run_gold_build(spec, ...)`
+- a sibling to the existing `run_gold()`, not a replacement.
+
+### dbt project layout (one shared project at `dbt/`, not one per build)
+
+```
+dbt/models/
+  sources.yml                    # one source() entry per pipeline's stage table
+  staging/<pipeline>/stg_*.sql    # thin ~1:1 models over a stage table (renaming/
+                                  # casting for convenience - heavy cleaning already
+                                  # happened in raw->stage)
+  intermediate/int_*.sql          # heavy joins, multi-source business logic
+  marts/<domain>/*.sql            # final gold tables - one or more per build
+  asset_gold.sql, holdings_gold.sql, price_gold.sql   # legacy inline gold: models, untouched
+```
+
+**Tagging is mandatory**: every model belonging to a gold build - staging,
+intermediate, *and* mart - carries that build's tag:
+
+```sql
+{{ config(tags=['portfolio_summary_gold'], materialized='view') }}
+```
+
+so `dbt_select: "tag:portfolio_summary_gold"` selects exactly that build's
+models and nothing else sharing the project, verified directly:
+`dbt ls --select tag:portfolio_summary_gold` returns only
+`stg_holdings`/`stg_asset`/`int_portfolio_positions`/`portfolio_summary_gold`
+- never `asset_gold`/`holdings_gold`/`price_gold` (or any other build's
+models), and vice versa.
+
+One thing to know if you add a new gold build to this shared project: dbt
+**parses every model up front** before applying `--select`, even models it
+won't execute - so any legacy inline `gold:` model using
+`env_var('DBT_STAGE_SCHEMA')` needs a default value
+(`env_var('DBT_STAGE_SCHEMA', 'unused')`) so parsing doesn't fail on a
+`gold_builds` run that never sets those env vars. The three existing legacy
+models already have this; a new legacy-style model would need the same.
+
 ## Known scope decisions / limitations
 
 A few things were deliberately scoped down rather than left half-built:

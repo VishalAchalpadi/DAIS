@@ -19,7 +19,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from dais.spec.models import PipelineSpec
+from dais.spec.models import GoldBuildSpec, PipelineSpec
 
 _DATE_IN_FILENAME_RE = re.compile(r"(\d{8})")
 
@@ -86,6 +86,60 @@ def run_gold(
         spec.gold.dbt_project,
         "--select",
         spec.gold.dbt_select,
+    ]
+    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+
+    return GoldRunResult(
+        success=proc.returncode == 0,
+        return_code=proc.returncode,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+    )
+
+
+def run_gold_build(
+    gold_build_spec: GoldBuildSpec,
+    *,
+    host: str,
+    port: int,
+    dbname: str,
+    user: str,
+    password: str,
+) -> GoldRunResult:
+    """Phase 9a: runs a gold_builds/*.yaml spec - dbt.select is a tag
+    selector (e.g. "tag:trade_blotter_gold") scoping to exactly that
+    build's staging/intermediate/mart models, which reference their
+    upstream stage tables via dbt source() + sources.yml rather than the
+    env_var()-interpolated schema/table Jinja the legacy inline gold:
+    block uses (a gold build can depend on several pipelines' stage
+    tables at once - there's no single "the" stage table to interpolate).
+
+    A sibling function to run_gold(), not a replacement - existing
+    pipelines with an inline gold: block keep using run_gold() completely
+    unchanged."""
+    env = os.environ.copy()
+    env.update(
+        {
+            "DBT_PG_HOST": host,
+            "DBT_PG_PORT": str(port),
+            "DBT_PG_DBNAME": dbname,
+            "DBT_PG_USER": user,
+            "DBT_PG_PASSWORD": password,
+            "DBT_PG_SCHEMA": gold_build_spec.target.schema_,
+        }
+    )
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "dbt.cli.main",
+        "run",
+        "--project-dir",
+        gold_build_spec.dbt.project_dir,
+        "--profiles-dir",
+        gold_build_spec.dbt.project_dir,
+        "--select",
+        gold_build_spec.dbt.select,
     ]
     proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
 
