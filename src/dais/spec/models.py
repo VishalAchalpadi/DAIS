@@ -509,5 +509,10 @@ class GoldBuildSpec(StrictModel):
     dbt: GoldBuildDbtConfig
     target: GoldBuildTargetConfig
     sla: GoldBuildSlaConfig | None = None
+    # Phase 9b: reuses the SAME LineageConfig shape ingest pipelines use
+    # (not a parallel schema) - set namespace to match the namespace of
+    # the pipeline(s) in depends_on, so dbt-ol's emitted events land in
+    # the same OpenLineage graph as raw/stage, not a disconnected one.
+    lineage: LineageConfig | None = None
 
     _v_owner = field_validator("owner")(_reject_placeholder)

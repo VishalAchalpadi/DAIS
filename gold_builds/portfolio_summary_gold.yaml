@@ -41,3 +41,10 @@ target:
 sla:
   complete_by: "07:30"
   timezone: "America/New_York"
+
+# Phase 9b: same namespace holdings_ingest/asset_ingest use, so dbt-ol's
+# emitted events land in the same OpenLineage graph as their raw/stage
+# events rather than a disconnected one.
+lineage:
+  namespace: "datamesh-prod"
+  job_name: "gold-build-portfolio_summary_gold"

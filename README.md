@@ -552,6 +552,69 @@ won't execute - so any legacy inline `gold:` model using
 `gold_builds` run that never sets those env vars. The three existing legacy
 models already have this; a new legacy-style model would need the same.
 
+### OpenLineage-aware dbt runs (Phase 9b)
+
+Both `run_gold()` (legacy inline `gold:` block) and `run_gold_build()`
+(`gold_builds/*.yaml`) can emit real OpenLineage events for the dbt models
+they run, landing in the **same** OpenLineage graph as raw/stage's events
+(`lineage/emitter.py`) rather than a disconnected one:
+
+- `run_gold()` always does, since a `PipelineSpec`'s top-level `lineage:`
+  block is required and is reused directly - no separate gold-specific
+  lineage config.
+- `run_gold_build()` does only when its `gold_builds/*.yaml` spec sets an
+  **optional** `lineage:` block (same `namespace`/`job_name` shape as a
+  pipeline's), matching the namespace of the pipeline(s) in `depends_on`:
+
+  ```yaml
+  lineage:
+    namespace: "datamesh-prod"
+    job_name: "gold-build-portfolio_summary_gold"
+  ```
+
+  Omitting it (as most `gold_builds` specs may, especially during initial
+  rollout) falls back to a plain `dbt run` - no dbt-ol involvement at all.
+
+Under the hood this uses the [`openlineage-dbt`](https://github.com/OpenLineage/OpenLineage/tree/main/integration/dbt)
+package's `dbt-ol` wrapper: `dbt docs generate` runs first (produces
+`target/catalog.json`, which `dbt-ol` reads best-effort for column-level
+schema facets on top of dataset names), then `dbt-ol run` wraps the actual
+`dbt run` and emits START/COMPLETE OpenLineage events once it finishes.
+
+Two things worth knowing if you're touching this code:
+
+- **`OPENLINEAGE_NAMESPACE` is a different lever than `spec.lineage`.**
+  `dbt-ol` reads the target namespace from an `OPENLINEAGE_NAMESPACE`
+  env var (defaulting to `"dbt"` if unset) - not from a Python-level field
+  the way `lineage/emitter.py`'s raw/stage events are. This was verified
+  against the actually-installed `openlineage-dbt` v1.53.0 source (not
+  assumed from docs), per this phase's explicit instruction to confirm the
+  installed package's real configuration surface. `_dbt_ol_env()` in
+  `medallion/gold.py` sets it from `spec.lineage.namespace` /
+  `gold_build_spec.lineage.namespace` so the two lineage paths agree.
+- **`dbt-ol` needs a real `dbt` executable on `PATH`.** Its internals
+  (`consume_local_artifacts()`) hardcode `subprocess.Popen(["dbt"] + args)`
+  with no override - unlike every other dbt invocation in this codebase,
+  which runs `python -m dbt.cli.main` and therefore never touches `PATH` at
+  all. `_dbt_ol_env()` prepends `os.path.dirname(sys.executable)` (the
+  venv's `Scripts/`, which has a real `dbt.exe` from `dbt-core`/
+  `dbt-postgres`) so `dbt-ol`'s internal `"dbt"` resolves correctly. This is
+  the one place in DAIS with a live dependency on `dbt.exe` existing and
+  being unblocked - worth remembering on a machine where Application
+  Control policies have intermittently blocked pip-regenerated `.exe`
+  console scripts before.
+
+**Inspecting the resulting lineage graph**: with no `OPENLINEAGE_URL` set,
+events print to the console (`ConsoleTransport`) - visible directly in
+`GoldRunResult.stdout`. Point `OPENLINEAGE_URL` at a real OpenLineage
+backend (Marquez, etc.) to see gold jobs and datasets show up connected to
+the same upstream stage tables raw/stage already reports lineage for.
+`tests/test_gold_lineage.py` verifies this end-to-end against the real
+`portfolio_summary_gold` example: a real `dbt-ol run` subprocess, with a
+real emitted event confirmed to carry the configured namespace and list
+`int_portfolio_positions` (the gold mart's upstream intermediate model) as
+an input.
+
 ## Known scope decisions / limitations
 
 A few things were deliberately scoped down rather than left half-built:

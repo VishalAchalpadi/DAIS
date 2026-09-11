@@ -10,6 +10,7 @@ dependencies = [
     "pandera>=0.19",
     "tenacity>=8.2",
     "openlineage-python>=1.13",
+    "openlineage-dbt>=1.13",
     "dbt-core>=1.7",
     "dbt-postgres>=1.7",
     "fastapi>=0.110",
