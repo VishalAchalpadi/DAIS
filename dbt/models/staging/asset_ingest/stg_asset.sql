@@ -9,4 +9,4 @@ select
     as_of_date,
     total_net_assets_usd,
     base_currency
-from {{ source('asset_ingest', 'stage') }}
+from {{ source('asset_ingest', 'asset_stage') }}

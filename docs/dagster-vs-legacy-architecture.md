@@ -122,7 +122,47 @@ flowchart TB
 
 ---
 
-*Reflects `src/dais/orchestration/dagster/` and `src/dais/medallion/gold.py`
-as of the unified-lineage fix. Remaining known gap: the legacy inline
+## Fig. 4 — One dataset, not two: matching identities end to end
+
+Emitting real OpenLineage events on both sides of the raw/stage → gold
+boundary isn't enough by itself. A backend like Marquez connects a graph
+by matching **(namespace, name)** dataset identity, not job identity - and
+`lineage/emitter.py` and `dbt-ol` used to name the *same physical stage
+table* two different ways:
+
+| | Before | After |
+|---|---|---|
+| `lineage/emitter.py` (raw/stage) | `datamesh-prod` / `data_in.sales_stage` | `postgres://{host}:{port}` / `{dbname}.data_in.sales_stage` |
+| `dbt-ol` (gold, unchanged - third-party) | `postgres://{host}:{port}` / `{dbname}.data_in.sales_stage` | *(same, unchanged)* |
+
+`lineage/emitter.py` now derives `db_namespace`/`dbname` from
+`connection_params` (already passed into `run_pipeline()` for the legacy
+gold path - reused here) and identifies anything shaped `"schema.table"`
+using dbt-ol's own convention, verified against its installed source. A
+source **file** path (not a table) keeps its original logical namespace -
+there's no external identity for it to match.
+
+One more real wrinkle, found and fixed alongside this: `dbt-ol`'s *coarse*
+dataset name for a `source()` node uses the source's declared table
+**alias**, not its resolved `identifier:` - a different code path inside
+the same tool than the one used for column-lineage, which does resolve the
+real name. `dbt/models/sources.yml` used a generic `stage` alias for every
+pipeline (fine on its own, but it doesn't match `sales_stage`, and using
+`stage` everywhere would collide across pipelines besides). Renamed each
+alias to match its identifier exactly (`sales_stage`, `holdings_stage`,
+...) - one name, no collision, and it now agrees with the real table name
+on both the coarse and column-lineage levels.
+
+Verified end to end, not assumed: a real `sales_ingest` run's `stage` step
+and a real `regional_sales_gold` dbt-ol run now emit the *identical*
+dataset identity - `postgres://localhost:5432` /
+`GEODS.data_in.sales_stage` - for both the top-level input/output entries
+and the nested column-lineage facet.
+
+---
+
+*Reflects `src/dais/orchestration/dagster/`, `src/dais/medallion/gold.py`,
+and `src/dais/lineage/emitter.py` as of the unified-lineage and
+matching-dataset-identity fixes. Remaining known gap: the legacy inline
 `gold:` path still isn't modeled as a Dagster asset at all - only
 `gold_builds/*.yaml` builds show up in Dagster's graph.*

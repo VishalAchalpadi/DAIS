@@ -76,7 +76,7 @@ def run_pipeline(
     layers = layers_to_run(stop_after)
 
     monitor = ProcessMonitor(connector, spec.monitoring.schema_, spec.monitoring.table)
-    emitter = lineage or build_emitter(spec)
+    emitter = lineage or build_emitter(spec, connection_params=connection_params)
     file_name = Path(file_path).name
 
     raw_bytes = _read_source_bytes(file_path, s3)

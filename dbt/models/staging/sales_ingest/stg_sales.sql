@@ -13,4 +13,4 @@ select
     units_sold,
     total_revenue,
     total_profit
-from {{ source('sales_ingest', 'stage') }}
+from {{ source('sales_ingest', 'sales_stage') }}

@@ -13,4 +13,4 @@ select
     quantity,
     market_value,
     currency
-from {{ source('holdings_ingest', 'stage') }}
+from {{ source('holdings_ingest', 'holdings_stage') }}
