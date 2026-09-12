@@ -2,7 +2,9 @@
 
 Dagster didn't replace anything — it sits beside Control-M as a second way
 to *trigger* the same pipeline code. Where the two paths genuinely diverge
-is gold, and that divergence has a real, currently-open gap in it.
+is gold, and that divergence used to leave a real lineage gap - since
+fixed for `gold_builds` (Fig. 2), though the legacy inline path still
+isn't modeled as a Dagster asset at all.
 
 **Core rule:** raw and stage always run through the exact same code —
 `dais.pipeline.run_pipeline()` — no matter which trigger fired it.
@@ -47,12 +49,13 @@ flowchart LR
 
 ---
 
-## Fig. 2 — Gold: two mechanisms, and a lineage gap inside one of them
+## Fig. 2 — Gold: two mechanisms, now unified on lineage
 
 An ingest pipeline picks exactly one gold mechanism. The legacy inline
 block only ever aggregates its own stage table; a `gold_builds` spec can
-join several. But `gold_builds` itself behaves differently depending on
-*how* it's run.
+join several. `gold_builds` used to behave differently depending on *how*
+it was run - the Dagster path skipped `dbt-ol` entirely. Fixed: both paths
+now emit a real OpenLineage event, without ever running the SQL twice.
 
 ```mermaid
 flowchart TB
@@ -65,16 +68,17 @@ flowchart TB
 
     BUILDS["gold_builds/*.yaml\n(portfolio_summary_gold,\nregional_sales_gold)"]
     HOW{"Triggered how?"}
-    CLIRUN["CLI / script\nrun_gold_build()"]
-    OL2["dbt-ol -> real OpenLineage event"]
-    DAGRUN["Dagster @dbt_assets\nDbtCliResource.cli()"]
-    NOOL["Dagster's own asset lineage only\nNO OpenLineage event emitted"]
+    CLIRUN["CLI / script\nrun_gold_build() -> dbt-ol run"]
+    OL2["real OpenLineage event"]
+    DAGRUN["Dagster @dbt_assets\nDbtCliResource.cli(['run'])"]
+    SENDEVENTS["dbt-ol run send-events\nparses the SAME run's artifacts\n(no second dbt execution)"]
+    OL3["real OpenLineage event"]
 
     STAGE --> CHOICE
     CHOICE -->|"single pipeline"| INLINE --> RUNGOLD --> OL1
     CHOICE -->|"spans pipelines"| BUILDS --> HOW
     HOW --> CLIRUN --> OL2
-    HOW --> DAGRUN --> NOOL
+    HOW --> DAGRUN --> SENDEVENTS --> OL3
 
     style STAGE fill:#e6f2f1,stroke:#0e7c7b,color:#1c1e24
     style INLINE fill:#f6ece0,stroke:#a8672a,color:#1c1e24
@@ -84,20 +88,25 @@ flowchart TB
     style CLIRUN fill:#ecebf9,stroke:#4a44b8,color:#1c1e24
     style OL2 fill:#e6f2f1,stroke:#0e7c7b,color:#1c1e24
     style DAGRUN fill:#ecebf9,stroke:#4a44b8,color:#1c1e24
-    style NOOL fill:#f8e9e9,stroke:#a83b3b,color:#1c1e24
+    style SENDEVENTS fill:#ecebf9,stroke:#4a44b8,color:#1c1e24
+    style OL3 fill:#e6f2f1,stroke:#0e7c7b,color:#1c1e24
 ```
 
 - 🟧 legacy inline gold
 - 🟪 gold_builds / Dagster
 - 🟩 real OpenLineage emitted
-- 🟥 gap — no OpenLineage emitted
 
-> **Open gap:** Materializing `regional_sales_gold` in Dagster runs the
-> identical dbt models as running it from the CLI — but Dagster's path
-> calls `DbtCliResource.cli()` directly instead of `run_gold_build()`, so
-> it never goes through `dbt-ol`. Same data, same SQL, two different
-> lineage outcomes depending on which button you pressed. **Not yet
-> fixed** as of Phase 9c.
+> **Fixed (unified lineage):** `gold_assets.py`'s `@dbt_assets` function
+> still runs dbt via Dagster's own `DbtCliResource.cli(["run"], ...)` -
+> giving Dagster its native per-model asset tracking - but immediately
+> afterward calls `dbt-ol run send-events`, pointed at the SAME
+> `target_path` that run just wrote `run_results.json`/`manifest.json` to.
+> `send-events` is a real mode in the installed `openlineage-dbt` package
+> (verified against its source, not assumed) that skips re-running dbt
+> entirely and just parses those artifacts - so one dbt run now feeds
+> *both* Dagster's own asset graph *and* a real OpenLineage event, with no
+> duplicate SQL execution. Applies whenever the build has a `lineage:`
+> block, exactly like the CLI path.
 
 ---
 
@@ -109,9 +118,11 @@ flowchart TB
 | dbt wiring | `env_var('DBT_STAGE_SCHEMA')` interpolation | Static `source()` against `sources.yml` |
 | Triggered from | `execution.stop_after: gold` on the pipeline spec | CLI script, or a dedicated Dagster job/asset |
 | Runs in Dagster? | Not modeled as a Dagster asset today | Yes — `@dbt_assets`, auto-discovered from the yaml |
-| OpenLineage | Always, via `dbt-ol` (Phase 9b) | Only when run via CLI/script — not yet when run via Dagster |
+| OpenLineage | Always, via `dbt-ol` (Phase 9b) | Always, via `run_gold_build()` (CLI) or `dbt-ol run send-events` (Dagster) |
 
 ---
 
 *Reflects `src/dais/orchestration/dagster/` and `src/dais/medallion/gold.py`
-as of Phase 9c. The Fig. 2 gap is a real, open item — not yet fixed.*
+as of the unified-lineage fix. Remaining known gap: the legacy inline
+`gold:` path still isn't modeled as a Dagster asset at all - only
+`gold_builds/*.yaml` builds show up in Dagster's graph.*

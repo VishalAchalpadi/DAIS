@@ -179,3 +179,56 @@ def test_gold_dbt_assets_materialize_via_real_dbt_run(test_schema, monkeypatch):
         assert result.success, result.all_events
     finally:
         tmp_spec_path.unlink(missing_ok=True)
+
+
+def test_dagster_triggered_gold_run_produces_artifacts_dbt_ol_can_read(monkeypatch):
+    """Part 1 of the unified-lineage fix, end to end: materializing gold
+    through Dagster (dagster-dbt's own DbtCliResource, not run_gold_build())
+    must still leave behind a real, freshly-written run_results.json/
+    manifest.json at invocation.target_path - the artifacts
+    run_dbt_ol_send_events() reads afterward with no second dbt run."""
+    monkeypatch.setenv("SECRETS_PROVIDER", "hardcoded")
+    assets_def, spec = build_gold_build_dbt_assets(EXAMPLE_GOLD_BUILD, DBT_PROJECT)
+    dbt = DbtCliResource(project_dir=DBT_PROJECT_DIR, dbt_executable=REAL_DBT_EXECUTABLE)
+
+    result = materialize([assets_def], resources={"dbt": dbt}, instance=DagsterInstance.ephemeral())
+
+    assert result.success, result.all_events
+
+
+def test_run_dbt_ol_send_events_emits_real_openlineage_without_rerunning_dbt(monkeypatch):
+    """Part 2: run_dbt_ol_send_events() against a real, already-completed
+    dbt run's artifacts (a real DbtCliInvocation from dagster-dbt, not a
+    mock) must emit a real OpenLineage event carrying the configured
+    namespace and the mart's real row count - and never re-invoke dbt
+    itself (verified by the ABSENCE of dbt's own "Running with dbt="
+    startup banner in the subprocess output, which only appears when dbt
+    actually starts)."""
+    monkeypatch.setenv("SECRETS_PROVIDER", "hardcoded")
+    assets_def, spec = build_gold_build_dbt_assets(EXAMPLE_GOLD_BUILD, DBT_PROJECT)
+    dbt = DbtCliResource(project_dir=DBT_PROJECT_DIR, dbt_executable=REAL_DBT_EXECUTABLE)
+
+    # Get a real DbtCliInvocation with real, on-disk artifacts by actually
+    # running dbt once - the same way the asset body does.
+    from dais.orchestration.dagster.gold_assets import _set_real_dbt_pg_env, run_dbt_ol_send_events
+
+    _set_real_dbt_pg_env(spec)
+    # Called outside the @dbt_assets-decorated function, so - unlike the
+    # real asset body - dagster-dbt won't auto-inject the build's own
+    # --select for us; without it this would run the WHOLE shared project,
+    # including the legacy inline-gold models that need DBT_STAGE_SCHEMA/
+    # TABLE env vars this call never sets.
+    # .wait() (not .stream()) - draining via stream() tries to translate
+    # events into Dagster asset materializations, which needs a real
+    # manifest/op context this standalone call doesn't have; .wait() just
+    # waits for the real dbt subprocess to finish and artifacts to land.
+    invocation = dbt.cli(["run", "--select", spec.dbt.select]).wait()
+
+    proc = run_dbt_ol_send_events(spec, invocation)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    output = proc.stdout + proc.stderr
+    assert "Sending events for the last run without running the job" in output
+    assert "Running with dbt=" not in output  # dbt's own startup banner - absent means it never ran
+    assert "Emitted" in output and "OpenLineage events" in output
+    assert f'"namespace": "{spec.lineage.namespace}"' in output
