@@ -87,6 +87,20 @@ def test_dedicated_gold_job_is_scoped_to_only_that_builds_dbt_assets():
     assert keys == {"stg_sales", "regional_sales_gold"}
 
 
+def test_dedicated_job_exists_per_ingest_pipeline():
+    for name in ("holdings_ingest_job", "asset_ingest_job", "sales_ingest_job"):
+        assert defs.resolve_job_def(name) is not None
+
+
+def test_dedicated_ingest_job_is_scoped_to_only_that_pipelines_asset():
+    """Mirrors the gold-build jobs: an ingest pipeline's own job must not
+    drag in every other pipeline's ingest asset the way dais_medallion_job
+    does - it should materialize exactly one asset."""
+    job = defs.resolve_job_def("sales_ingest_job")
+    keys = {k.to_user_string() for k in job.asset_layer.executable_asset_keys}
+    assert keys == {"sales_ingest/stage"}
+
+
 # ---------------------------------------------------------------------------
 # real end-to-end: a real API server, a real dbt run, no mocks
 # ---------------------------------------------------------------------------

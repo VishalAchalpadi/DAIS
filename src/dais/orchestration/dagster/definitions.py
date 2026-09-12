@@ -54,6 +54,19 @@ for spec_path in sorted(GOLD_BUILDS_DIR.glob("*.yaml")):
 # free.
 ingest_assets_definitions = [build_ingest_asset(name) for name in sorted(depends_on_pipelines)]
 
+# A dedicated job per ingest pipeline too, mirroring gold_build_jobs above -
+# same asset (ingest_assets.py, still just an HTTP call to the real DAIS
+# API), just addressable on its own instead of only via the Catalog page
+# or the everything-at-once dais_medallion_job.
+ingest_jobs = [
+    define_asset_job(
+        name=f"{pipeline_name}_job",
+        selection=AssetSelection.assets(asset_def),
+        description=f"Runs the {pipeline_name} pipeline (raw/stage, via the DAIS HTTP API).",
+    )
+    for pipeline_name, asset_def in zip(sorted(depends_on_pipelines), ingest_assets_definitions)
+]
+
 all_assets = [*ingest_assets_definitions, *gold_assets_definitions]
 
 dais_medallion_job = define_asset_job(
@@ -68,7 +81,7 @@ dais_medallion_job = define_asset_job(
 
 defs = Definitions(
     assets=all_assets,
-    jobs=[dais_medallion_job, *gold_build_jobs],
+    jobs=[dais_medallion_job, *gold_build_jobs, *ingest_jobs],
     resources={
         "dais_api": DaisApiResource(
             base_url=os.environ.get("DAIS_API_BASE_URL", "http://localhost:8000"),
