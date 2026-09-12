@@ -23,3 +23,10 @@ data/
 # dais-recommend-dq draft output - a per-run human-review artifact, never
 # a durable spec; promoting a suggestion means hand-editing the real spec
 specs/*.dq_suggestions.yaml
+
+# runtime artifacts from local dagster dev / uvicorn sessions - never
+# durable, and dagster dev's home dir is a live SQLite/log directory while
+# running (do not delete while a `dagster dev` process is up)
+.tmp_dagster_home_*/
+*_stdout.log
+*_stderr.log

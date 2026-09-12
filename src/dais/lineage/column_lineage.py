@@ -242,5 +242,13 @@ def build_lineage_graph(
     spec: PipelineSpec, *, host: str, port: int, dbname: str, user: str, password: str
 ) -> list[ColumnEdge]:
     edges = raw_to_stage_edges(spec)
-    edges += stage_to_gold_edges(spec, host=host, port=port, dbname=dbname, user=user, password=password)
+    # Phase 9a made spec.gold optional (gold logic can live in a
+    # gold_builds/*.yaml GoldBuildSpec instead) - there is no single-pipeline
+    # dbt model to compile here in that case. Those builds already get real
+    # column-level lineage a different way: dbt-ol (Phase 9b, via
+    # medallion/gold.py's run_gold_build) emits real OpenLineage events
+    # using dbt's own manifest/catalog. This CLI command covers only the
+    # legacy inline gold: shape.
+    if spec.gold is not None:
+        edges += stage_to_gold_edges(spec, host=host, port=port, dbname=dbname, user=user, password=password)
     return edges

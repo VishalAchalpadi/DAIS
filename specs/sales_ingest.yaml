@@ -1,0 +1,164 @@
+# =========================================================================
+# Pipeline Spec: sales_ingest
+#
+# Daily regional sales order extract, CSV format. quality.rules below was
+# hand-written after inspecting a sample of the source file - in an
+# environment with ANTHROPIC_API_KEY set, the same step would normally
+# start from AI-suggested rules instead:
+#
+#   dais-recommend-dq --spec specs/sales_ingest.yaml --sample-size 500
+#
+# (or, before the pipeline has ever run: add --file data/sales/incoming/
+# sales_20260901.csv). It writes suggestions - never applies them - to
+# specs/sales_ingest.dq_suggestions.yaml for human review.
+# =========================================================================
+
+pipeline_name: sales_ingest
+description: "Ingests daily regional sales order extracts (CSV) into raw/stage"
+owner: "sales-analytics-team"
+
+execution:
+  stop_after: stage   # gold lives in gold_builds/regional_sales_gold.yaml instead
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: csv
+  location:
+    kind: local
+    path: "./data/sales/incoming/"
+    file_pattern: "sales_{date}.csv"
+
+parser:
+  type: csv
+  has_header: true
+
+control_gates:
+  file_size:
+    min_bytes: 50
+    max_bytes: 150000000
+  row_count:
+    min_rows: 5
+    max_rows: 10000000
+  on_fail: quarantine_file
+
+raw:
+  schema: data_in
+  table: sales_raw
+  ddl_mode: create_if_not_exists
+  column_type: text
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true
+
+quality:
+  integrity_mode: row_level   # only the failing row(s) are quarantined,
+                              # not the whole file - sales orders are
+                              # independent records
+  rules:
+    - column: region
+      checks: [not_null, non_empty]
+    - column: country
+      checks: [not_null, non_empty]
+    - column: item_type
+      checks: [not_null, non_empty]
+    - column: sales_channel
+      checks: [not_null, non_empty]
+    - column: order_priority
+      checks: [not_null, non_empty]
+    - column: order_date
+      checks: [not_null, valid_date]
+      cast_to: date
+      format: "%m/%d/%Y"
+    - column: order_id
+      checks: [not_null, is_numeric]
+    - column: ship_date
+      checks: [not_null, valid_date]
+      cast_to: date
+      format: "%m/%d/%Y"
+    - column: units_sold
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 12
+      scale: 0
+    - column: unit_price
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 12
+      scale: 2
+    - column: unit_cost
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 12
+      scale: 2
+    - column: total_revenue
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 2
+    - column: total_cost
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 2
+    - column: total_profit
+      checks: [not_null, is_numeric]
+      cast_to: decimal
+      precision: 18
+      scale: 2
+  quarantine:
+    kind: local
+    location: "./data/sales/quarantine/"
+    alert:
+      channel: log
+      destination: "sales-dq-alerts@example.com"
+
+stage:
+  schema: data_in
+  table: sales_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["order_id"]
+  write_mode: upsert
+
+resilience:
+  retry:
+    max_attempts: 5
+    backoff: exponential
+    base_delay_seconds: 2
+    jitter: true
+
+lineage:
+  namespace: "datamesh-prod"
+  job_name: sales_ingest
+
+# ------------------------------------------------------------------------
+# Anomaly detection (Phase 8b) - z-score against this pipeline's own
+# trailing history, computed on the validated stage dataframe. window: 5
+# keeps the demo's baseline short; a real daily feed would use more
+# history (the default is 20).
+#
+# threshold: with a population z-score computed over baseline+current
+# (window=5 -> 6 points total), no single point's |z| can mathematically
+# exceed sqrt(n-1) = sqrt(5) ~= 2.236, however extreme the outlier is -
+# discovered while tuning this spec against a real 20x revenue spike that
+# threshold: 3.0 could never have caught. 2.0 leaves headroom above
+# ordinary day-to-day noise while still being reachable at this window size.
+# ------------------------------------------------------------------------
+anomaly_detection:
+  enabled: true
+  metrics: ["row_count", "total_revenue_sum"]
+  method: zscore
+  threshold: 2.0
+  window: 5
+  on_anomaly: alert

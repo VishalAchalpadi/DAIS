@@ -73,6 +73,20 @@ def test_gold_mart_transitively_depends_on_both_ingest_assets():
     assert {"holdings_ingest/stage", "asset_ingest/stage"}.issubset(ancestors)
 
 
+def test_dedicated_job_exists_per_gold_build():
+    for name in ("portfolio_summary_gold_job", "regional_sales_gold_job"):
+        assert defs.resolve_job_def(name) is not None
+
+
+def test_dedicated_gold_job_is_scoped_to_only_that_builds_dbt_assets():
+    """A gold build's own job must not drag in ingest assets or another
+    build's models - it's meant to be run standalone (e.g. a scheduled
+    gold-only refresh), not the full dais_medallion_job graph."""
+    job = defs.resolve_job_def("regional_sales_gold_job")
+    keys = {k.to_user_string() for k in job.asset_layer.executable_asset_keys}
+    assert keys == {"stg_sales", "regional_sales_gold"}
+
+
 # ---------------------------------------------------------------------------
 # real end-to-end: a real API server, a real dbt run, no mocks
 # ---------------------------------------------------------------------------

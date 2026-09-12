@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from dais.lineage.column_lineage import (
+    build_lineage_graph,
     raw_to_stage_edges,
     stage_to_gold_edges_from_sql,
 )
@@ -117,3 +118,19 @@ def test_stage_to_gold_edge_target_table_matches_gold_config():
     spec = _asset_gold_spec()
     edges = stage_to_gold_edges_from_sql(_COMPILED_SQL, spec)
     assert all(e.target.table == f"{spec.gold.schema_}.{spec.gold.dbt_select}" for e in edges)
+
+
+# ---------------------------------------------------------------------------
+# build_lineage_graph: spec.gold is optional since Phase 9a (gold logic can
+# live in a gold_builds/*.yaml GoldBuildSpec instead) - this must not
+# attempt to compile a dbt model that doesn't exist on the PipelineSpec.
+# ---------------------------------------------------------------------------
+
+def test_build_lineage_graph_skips_stage_to_gold_when_gold_block_absent():
+    spec = load_spec(Path(__file__).parent.parent / "specs" / "sales_ingest.yaml")
+    assert spec.gold is None
+
+    edges = build_lineage_graph(spec, host="unused", port=5432, dbname="unused", user="unused", password="unused")
+
+    assert len(edges) > 0
+    assert all(e.target.layer == "stage" for e in edges)

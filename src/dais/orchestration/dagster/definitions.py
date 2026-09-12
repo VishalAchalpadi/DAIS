@@ -27,6 +27,7 @@ GOLD_BUILDS_DIR = REPO_ROOT / "gold_builds"
 
 gold_assets_definitions = []
 gold_build_specs = []
+gold_build_jobs = []
 depends_on_pipelines: set[str] = set()
 
 for spec_path in sorted(GOLD_BUILDS_DIR.glob("*.yaml")):
@@ -34,6 +35,18 @@ for spec_path in sorted(GOLD_BUILDS_DIR.glob("*.yaml")):
     gold_assets_definitions.append(assets_def)
     gold_build_specs.append(spec)
     depends_on_pipelines.update(spec.depends_on)
+
+    # A dedicated job per gold build - lets you run e.g. regional_sales_gold_job
+    # directly (its stg_*/int_*/mart models, dependency-ordered) without
+    # hand-selecting assets or dragging in every other pipeline's ingest
+    # assets the way dais_medallion_job does.
+    gold_build_jobs.append(
+        define_asset_job(
+            name=f"{spec.gold_build_name}_job",
+            selection=AssetSelection.assets(assets_def),
+            description=f"Runs the {spec.gold_build_name} gold build (gold_builds/{spec_path.name}) via dbt.",
+        )
+    )
 
 # One ingest asset per pipeline any gold_builds/*.yaml spec depends on -
 # discovered from the specs themselves, not hardcoded, so adding a new
@@ -55,7 +68,7 @@ dais_medallion_job = define_asset_job(
 
 defs = Definitions(
     assets=all_assets,
-    jobs=[dais_medallion_job],
+    jobs=[dais_medallion_job, *gold_build_jobs],
     resources={
         "dais_api": DaisApiResource(
             base_url=os.environ.get("DAIS_API_BASE_URL", "http://localhost:8000"),

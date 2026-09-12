@@ -1,0 +1,32 @@
+# =========================================================================
+# Gold Build Spec: regional_sales_gold
+#
+# Rolls sales_ingest's order-level rows up into a (region, item_type)
+# summary. A single-pipeline gold build - depends_on only needs one entry
+# here, unlike portfolio_summary_gold's multi-pipeline reconciliation -
+# gold_builds/*.yaml isn't reserved for multi-source joins, it's simply
+# the modern home for gold logic instead of an inline gold: block.
+# =========================================================================
+
+gold_build_name: regional_sales_gold
+description: "Rolls up sales_ingest order-level rows into a region/item_type summary"
+owner: "sales-analytics-team"
+
+depends_on:
+  - sales_ingest
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+dbt:
+  project_dir: "dbt/"
+  select: "tag:regional_sales_gold"
+
+target:
+  schema: core
+  primary_table: regional_sales_gold
+
+lineage:
+  namespace: "datamesh-prod"
+  job_name: "gold-build-regional_sales_gold"

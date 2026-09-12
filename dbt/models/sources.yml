@@ -34,3 +34,9 @@ sources:
     tables:
       - name: stage
         identifier: benchmark_stage
+
+  - name: sales_ingest
+    schema: data_in
+    tables:
+      - name: stage
+        identifier: sales_stage
