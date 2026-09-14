@@ -22,7 +22,7 @@ from dagster_dbt import DbtCliResource
 
 from dais.api.app import create_app
 from dais.orchestration.dagster.api_resource import DaisApiResource
-from dais.orchestration.dagster.definitions import defs
+from dais.orchestration.dagster.definitions import defs, gold_assets_definitions
 from dais.orchestration.dagster.dbt_project import DBT_PROJECT, DBT_PROJECT_DIR, REAL_DBT_EXECUTABLE
 from dais.orchestration.dagster.gold_assets import DaisDagsterDbtTranslator, build_gold_build_dbt_assets
 from dais.orchestration.dagster.ingest_assets import build_ingest_asset
@@ -99,6 +99,34 @@ def test_dedicated_ingest_job_is_scoped_to_only_that_pipelines_asset():
     job = defs.resolve_job_def("sales_ingest_job")
     keys = {k.to_user_string() for k in job.asset_layer.executable_asset_keys}
     assert keys == {"sales_ingest/stage"}
+
+
+def test_gold_models_get_eager_automation_condition_but_sources_do_not():
+    """Stage->gold should auto-fire via Declarative Automation without a
+    combined job: every real dbt model gets AutomationCondition.eager(), so
+    Dagster queues its run the moment its upstream updates (needs
+    dagster-daemon running to actually evaluate). Sources are ingest_assets'
+    stage assets under another name (see get_asset_key) - they must stay
+    externally triggered only, never auto-materialized from nothing."""
+    translator = DaisDagsterDbtTranslator()
+    assert translator.get_automation_condition({"resource_type": "model"}) is not None
+    assert translator.get_automation_condition({"resource_type": "source", "source_name": "sales_ingest"}) is None
+
+
+def test_gold_build_assets_carry_automation_condition_end_to_end():
+    for assets_def in gold_assets_definitions:
+        for key in assets_def.keys:
+            if key.path[-1].startswith("stg_") or "gold" in key.path[-1] or key.path[-1].startswith("int_"):
+                assert key in assets_def.automation_conditions_by_key, f"{key} missing an automation condition"
+
+
+def test_dedicated_job_exists_even_for_a_pipeline_no_gold_build_depends_on():
+    """fund_positions_ingest has no gold_builds/*.yaml naming it in
+    depends_on - it must still get an asset and a job, discovered directly
+    from specs/*.yaml, not only from what gold builds happen to reference."""
+    job = defs.resolve_job_def("fund_positions_ingest_job")
+    keys = {k.to_user_string() for k in job.asset_layer.executable_asset_keys}
+    assert keys == {"fund_positions_ingest/stage"}
 
 
 # ---------------------------------------------------------------------------

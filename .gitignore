@@ -28,5 +28,6 @@ specs/*.dq_suggestions.yaml
 # durable, and dagster dev's home dir is a live SQLite/log directory while
 # running (do not delete while a `dagster dev` process is up)
 .tmp_dagster_home_*/
+.dagster_home/
 *_stdout.log
 *_stderr.log

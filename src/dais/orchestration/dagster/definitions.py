@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dagster import AssetSelection, Definitions, EnvVar, define_asset_job
+from dagster import AssetSelection, Definitions, EnvVar, define_asset_job, in_process_executor
 from dagster_dbt import DbtCliResource
 
 from dais.orchestration.dagster.api_resource import DaisApiResource
@@ -24,6 +24,7 @@ from dais.orchestration.dagster.ingest_assets import build_ingest_asset
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 GOLD_BUILDS_DIR = REPO_ROOT / "gold_builds"
+SPECS_DIR = REPO_ROOT / "specs"
 
 gold_assets_definitions = []
 gold_build_specs = []
@@ -48,23 +49,42 @@ for spec_path in sorted(GOLD_BUILDS_DIR.glob("*.yaml")):
         )
     )
 
-# One ingest asset per pipeline any gold_builds/*.yaml spec depends on -
-# discovered from the specs themselves, not hardcoded, so adding a new
-# gold build that depends on a new pipeline wires up its ingest asset for
-# free.
-ingest_assets_definitions = [build_ingest_asset(name) for name in sorted(depends_on_pipelines)]
+# One ingest asset per pipeline spec under specs/*.yaml - discovered from
+# the specs themselves, not hardcoded, so adding a new spec file wires up
+# its ingest asset (and dedicated job, below) for free, whether or not any
+# gold_builds/*.yaml depends on it yet. Union with depends_on_pipelines
+# just in case a gold build's depends_on ever names a pipeline whose own
+# specs/*.yaml file has since been removed/renamed - keeps that build from
+# silently losing its upstream asset.
+all_pipeline_names = sorted(
+    {p.stem for p in SPECS_DIR.glob("*.yaml") if not p.stem.endswith(".dq_suggestions")} | depends_on_pipelines
+)
+ingest_assets_definitions = [build_ingest_asset(name) for name in all_pipeline_names]
 
 # A dedicated job per ingest pipeline too, mirroring gold_build_jobs above -
 # same asset (ingest_assets.py, still just an HTTP call to the real DAIS
 # API), just addressable on its own instead of only via the Catalog page
 # or the everything-at-once dais_medallion_job.
+#
+# in_process_executor: each of these jobs materializes exactly one asset
+# (see test_dedicated_ingest_job_is_scoped_to_only_that_pipelines_asset),
+# so there is no parallelism to lose - but Dagster's default multiprocess
+# executor still spawns a whole separate OS process for that one step,
+# which re-imports this entire definitions.py module (including
+# dbt_project.py's prepare_if_dev(), a real `dbt parse`) a SECOND time on
+# top of the run's own process already having just done the same thing.
+# Measured: ~65s wall clock for a run whose actual pipeline work (per
+# control.process_monitor) was ~0.2s - almost all of it two redundant
+# cold imports. in_process_executor runs the step in the run's own
+# process instead, cutting that to one.
 ingest_jobs = [
     define_asset_job(
         name=f"{pipeline_name}_job",
         selection=AssetSelection.assets(asset_def),
         description=f"Runs the {pipeline_name} pipeline (raw/stage, via the DAIS HTTP API).",
+        executor_def=in_process_executor,
     )
-    for pipeline_name, asset_def in zip(sorted(depends_on_pipelines), ingest_assets_definitions)
+    for pipeline_name, asset_def in zip(all_pipeline_names, ingest_assets_definitions)
 ]
 
 all_assets = [*ingest_assets_definitions, *gold_assets_definitions]

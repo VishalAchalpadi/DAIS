@@ -1,0 +1,135 @@
+# =========================================================================
+# Pipeline Spec: fund_positions_ingest
+#
+# Ingests FundsXML 4.0.0 equity-fund position extracts. Real sample:
+# data/fundPositions/incoming/Equity-Fund_Positions.xml
+#
+# XML shape note: position-level facts (ISIN, position value, units,
+# price) all sit one or two levels *below* <Position> in FundsXML
+# (e.g. <Identifiers><ISIN>...</ISIN></Identifiers>), not as direct text
+# children of it. src/dais/parsers/xml_parser.py was extended (this spec
+# is what prompted it) to recurse into such wrapper elements and flatten
+# them with dot-joined names - "Identifiers.ISIN", "TotalValue.Amount",
+# "TotalValue.Amount@ccy" (the amount's ccy attribute), etc. Those dotted/
+# @-suffixed names are valid Postgres identifiers (the connector layer
+# always quotes column names), so they're used as-is below rather than
+# introducing a separate column-renaming step.
+#
+# business_key/write_mode note: <Position><UniqueID> ("ID_001", "ID_002",
+# ...) is only unique *within one fund's one NavDate snapshot* - the flat
+# per-Position parse doesn't carry the enclosing Fund (LEI) or NavDate
+# context, so it can't be safely upserted on across different funds/days.
+# stage therefore appends each day's positions as new rows rather than
+# upserting - business_key documents the intended identity, not an
+# enforced-unique upsert key. Capturing Fund/NavDate as columns (so a real
+# composite key is possible) would need the XML parser to carry ancestor
+# context down to each matched record, which is a natural follow-on but
+# out of scope here.
+# =========================================================================
+
+pipeline_name: fund_positions_ingest
+description: "Ingests daily equity fund position extracts (FundsXML) into raw/stage"
+owner: "portfolio-management-team"
+
+execution:
+  stop_after: stage
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: xml
+  location:
+    kind: local
+    path: "./data/fundPositions/incoming/"
+    file_pattern: "Equity-Fund_Positions.xml"
+
+parser:
+  type: xml
+  record_xpath: ".//Position"
+
+control_gates:
+  file_size:
+    min_bytes: 50
+    max_bytes: 50000000
+  row_count:
+    min_rows: 1
+    max_rows: 500000
+  on_fail: quarantine_file
+
+raw:
+  schema: data_in
+  table: fund_positions_raw
+  ddl_mode: create_if_not_exists
+  column_type: text
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true
+
+quality:
+  integrity_mode: row_level   # each position is an independent record
+  rules:
+    - column: UniqueID
+      checks: [not_null, non_empty]
+    - column: "Identifiers.ISIN"
+      checks: [not_null, non_empty]
+    - column: Currency
+      checks: [not_null, non_empty]
+    - column: "TotalValue.Amount"
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 2
+    - column: "TotalValue.Amount@ccy"
+      checks: [not_null, non_empty]
+    - column: TotalPercentage
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 5
+      scale: 2
+    - column: "Equity.Units"
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 4
+    - column: "Equity.Price.Amount"
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 4
+    - column: "Equity.Price.Amount@ccy"
+      checks: [not_null, non_empty]
+  quarantine:
+    kind: local
+    location: "./data/fundPositions/quarantine/"
+    alert:
+      channel: log
+      destination: "fund-positions-dq-alerts@example.com"
+
+stage:
+  schema: data_in
+  table: fund_positions_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["UniqueID"]
+  write_mode: append
+
+resilience:
+  retry:
+    max_attempts: 5
+    backoff: exponential
+    base_delay_seconds: 2
+    jitter: true
+
+lineage:
+  namespace: "datamesh-prod"
+  job_name: fund_positions_ingest

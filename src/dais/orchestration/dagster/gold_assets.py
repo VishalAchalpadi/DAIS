@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from dagster import AssetExecutionContext, AssetKey
+from dagster import AssetExecutionContext, AssetKey, AutomationCondition
 from dagster_dbt import DagsterDbtTranslator, DbtCliResource, DbtProject, dbt_assets
 from dagster_dbt.core.dbt_cli_invocation import DbtCliInvocation
 
@@ -54,6 +54,20 @@ class DaisDagsterDbtTranslator(DagsterDbtTranslator):
         if dbt_resource_props["resource_type"] == "source":
             return AssetKey([dbt_resource_props["source_name"], "stage"])
         return super().get_asset_key(dbt_resource_props)
+
+    def get_automation_condition(self, dbt_resource_props: Mapping[str, Any]) -> AutomationCondition | None:
+        # Sources are ingest_assets.py's stage assets under a different name
+        # (see get_asset_key above) - they're triggered externally (a job
+        # run, Control-M, a future schedule/sensor), never by Dagster
+        # deciding to auto-materialize them from nothing. Every real dbt
+        # model gets eager(): the moment its upstream (this source, or
+        # another model in the same build) updates, Dagster automatically
+        # queues a run for it - stage -> gold with no manual "run gold" step,
+        # as long as dagster-daemon is running (this condition is inert
+        # without it; `dagster dev` alone does not evaluate it).
+        if dbt_resource_props["resource_type"] == "source":
+            return None
+        return AutomationCondition.eager()
 
 
 def _set_real_dbt_pg_env(spec: GoldBuildSpec) -> None:

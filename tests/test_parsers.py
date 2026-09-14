@@ -165,6 +165,36 @@ def test_xml_no_matches_returns_empty_df():
     assert df.shape == (0, 0)
 
 
+def test_xml_flattens_nested_wrapper_elements_with_dotted_names():
+    """Real formats (e.g. FundsXML) wrap leaf values in structural elements
+    rather than exposing them as direct text children - a value nested two
+    levels deep must not be silently dropped."""
+    raw = b"""<?xml version="1.0"?>
+    <Positions>
+        <Position id="p1">
+            <UniqueID>ID_001</UniqueID>
+            <Identifiers>
+                <ISIN>NL0010273215</ISIN>
+            </Identifiers>
+            <Equity>
+                <Price>
+                    <Amount ccy="EUR">941.18</Amount>
+                </Price>
+            </Equity>
+        </Position>
+    </Positions>
+    """
+    config = ParserConfig(type="xml", record_xpath=".//Position")
+    df = get_parser("xml").parse(raw, config)
+    assert df.shape == (1, 5)
+    row = df.to_dicts()[0]
+    assert row["@id"] == "p1"
+    assert row["UniqueID"] == "ID_001"
+    assert row["Identifiers.ISIN"] == "NL0010273215"
+    assert row["Equity.Price.Amount"] == "941.18"
+    assert row["Equity.Price.Amount@ccy"] == "EUR"
+
+
 # ---------------------------------------------------------------------------
 # registry
 # ---------------------------------------------------------------------------
