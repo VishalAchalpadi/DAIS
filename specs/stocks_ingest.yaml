@@ -1,0 +1,118 @@
+# =========================================================================
+# Pipeline Spec: stocks_ingest
+#
+# Ingests a static stock reference/price-snapshot feed (JSON, a top-level
+# array of one object per company) into raw/stage/gold. Real sample:
+# data/stocks/incoming/sample-stocks-data.json
+#
+# Gold note: `symbol` is a genuine stable natural key here (unlike, say,
+# fund_positions_ingest's per-file-scoped UniqueID) - the same feed can be
+# re-ingested with corrected prices for an existing symbol, so gold is
+# SCD Type 2 keyed on symbol: a later run only creates a new version for
+# a symbol whose derived return metrics actually changed, leaving
+# unchanged symbols alone. See dbt/models/stocks_gold.sql.
+# =========================================================================
+
+pipeline_name: stocks_ingest
+description: "Ingests a stock reference/price-snapshot feed (JSON) into raw/stage/gold"
+owner: "market-data-team"
+
+execution:
+  stop_after: gold
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: json
+  location:
+    kind: local
+    path: "./data/stocks/incoming/"
+    file_pattern: "sample-stocks-data.json"
+
+parser:
+  type: json
+
+control_gates:
+  file_size:
+    min_bytes: 50
+    max_bytes: 50000000
+  row_count:
+    min_rows: 1
+    max_rows: 10000
+  on_fail: quarantine_file
+
+raw:
+  schema: data_in
+  table: stocks_raw
+  ddl_mode: create_if_not_exists
+  column_type: text
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true
+
+quality:
+  integrity_mode: row_level   # each stock record is an independent entity
+  rules:
+    - column: symbol
+      checks: [not_null, non_empty]
+    - column: company
+      checks: [not_null, non_empty]
+    - column: description
+      checks: [not_null, non_empty]
+    - column: initial_price
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 12
+      scale: 4
+    - column: price_2002
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 12
+      scale: 4
+    - column: price_2007
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 12
+      scale: 4
+  quarantine:
+    kind: local
+    location: "./data/stocks/quarantine/"
+    alert:
+      channel: log
+      destination: "stocks-dq-alerts@example.com"
+
+stage:
+  schema: data_in
+  table: stocks_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["symbol"]
+  write_mode: upsert
+
+gold:
+  schema: core
+  dbt_project: "dbt/"
+  dbt_select: "stocks_gold"
+  scd_type: 2
+  scd_key: ["symbol"]
+
+resilience:
+  retry:
+    max_attempts: 5
+    backoff: exponential
+    base_delay_seconds: 2
+    jitter: true
+
+lineage:
+  namespace: "datamesh-prod"
+  job_name: stocks_ingest

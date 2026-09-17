@@ -15,8 +15,8 @@ failures.
 
 | Service | Command | Required env vars |
 |---|---|---|
-| DAIS API (spec editor, quarantine UI, docs, pipeline trigger) | `python -m dais.api.main` from the repo root | `DAIS_API_KEY`, `SECRETS_PROVIDER=hardcoded` |
-| Dagster | `python -m dagster dev -f src/dais/orchestration/dagster/definitions.py` from the repo root | `DAGSTER_HOME`, `DAIS_API_KEY`, `SECRETS_PROVIDER=hardcoded` |
+| DAIS API (spec editor, quarantine UI, docs, pipeline trigger) | `python -m dais.api.main` from the repo root | `DAIS_API_KEY`, `SECRETS_PROVIDER=hardcoded`, `OPENLINEAGE_URL=http://localhost:5000` |
+| Dagster | `python -m dagster dev -f src/dais/orchestration/dagster/definitions.py` from the repo root | `DAGSTER_HOME`, `DAIS_API_KEY`, `SECRETS_PROVIDER=hardcoded`, `OPENLINEAGE_URL=http://localhost:5000` |
 | Marquez API | `java -jar <marquez-clone>/api/build/libs/marquez-api-*.jar server marquez.local.yml`, cwd = the marquez clone dir | none (reads `marquez.local.yml`) |
 | Marquez web | `npm run dev` from `<marquez-clone>/web`, needs Node on `PATH` | `MARQUEZ_HOST=localhost`, `MARQUEZ_PORT=5000` |
 
@@ -29,18 +29,37 @@ URLs once up:
 
 API key for both DAIS UIs is whatever `DAIS_API_KEY` was set to (`dev-key` in this environment's convention).
 
-### The #1 recurring mistake: `SECRETS_PROVIDER` set on only one process
+### The #1 recurring mistake: per-process env vars set on only one process
 
-`get_secrets_provider()` (`src/dais/secrets/factory.py`) defaults to a real
-Vault client unless `SECRETS_PROVIDER=hardcoded` is set **in that specific
-process's own environment** — there is no shared/global state. Both the
-DAIS API server AND `dagster dev` independently resolve secrets in their
-own process (the API server for pipeline runs; `dagster dev` directly,
-inside `gold_assets.py`'s dbt run). Setting it on one and not the other
-produces `Vault client is not authenticated - check VAULT_ADDR/VAULT_TOKEN`
-from whichever process you forgot — this has happened repeatedly. Always
-set `SECRETS_PROVIDER=hardcoded` before starting *every* Python process in
-this stack, not just the one you're thinking about at the time.
+Both `SECRETS_PROVIDER` and `OPENLINEAGE_URL` are **per-process** env vars
+with no shared/global state — every Python process in this stack resolves
+each independently, and forgetting either on any *one* of them produces a
+failure that looks like it's specific to that process, when actually it's
+just this same class of mistake recurring:
+
+- `get_secrets_provider()` (`src/dais/secrets/factory.py`) defaults to a
+  real Vault client unless `SECRETS_PROVIDER=hardcoded` is set in that
+  process's own environment. Both the DAIS API server (for pipeline runs)
+  AND `dagster dev` (directly, inside `gold_assets.py`'s dbt run) resolve
+  secrets independently. Missing it produces `Vault client is not
+  authenticated - check VAULT_ADDR/VAULT_TOKEN` from whichever process you
+  forgot.
+- `build_client()` (`src/dais/lineage/emitter.py`) only sends real
+  OpenLineage events to Marquez if `OPENLINEAGE_URL` is set in that
+  process's environment — otherwise it silently falls back to a
+  `ConsoleTransport` that logs locally and sends nothing, **with no error
+  at all**. This is the more dangerous of the two exactly because it fails
+  silently: a pipeline run reports `succeeded` normally, and the only
+  symptom is the run's job/dataset never appearing in Marquez. Both the
+  DAIS API server (pipeline lineage) and `dagster dev` (dbt-ol's gold
+  lineage) need it independently.
+
+Always set **all three** (`SECRETS_PROVIDER=hardcoded`, `DAIS_API_KEY`,
+`OPENLINEAGE_URL=http://localhost:5000`) before starting *every* Python
+process in this stack, not just the one you're thinking about at the time
+— and when something is missing from Marquez that you expected to see,
+check this before assuming the pipeline itself is broken: the run very
+likely succeeded, it just never emitted.
 
 Local secrets live in `secrets.local.yaml` at the repo root (real content:
 `aurora_postgres_prod` → local Postgres creds).

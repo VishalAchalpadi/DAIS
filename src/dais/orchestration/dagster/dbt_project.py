@@ -48,10 +48,41 @@ os.environ.setdefault("DBT_PG_SCHEMA", "unused")
 
 DBT_PROJECT = DbtProject(project_dir=DBT_PROJECT_DIR)
 
-# prepare_if_dev() only acts under `dagster dev` (DAGSTER_IS_DEV_CLI); fall
-# back to preparing explicitly so Definitions still loads (e.g. under
-# pytest, or a plain `dagster asset materialize`) without requiring that
-# CLI specifically.
-DBT_PROJECT.prepare_if_dev()
-if not DBT_PROJECT.manifest_path.exists():
-    DBT_PROJECT.preparer.prepare(DBT_PROJECT)
+_DBT_SOURCE_SUFFIXES = (".sql", ".yml", ".yaml")
+_DBT_GENERATED_DIRS = {"target", "dbt_packages", "logs"}
+
+
+def _dbt_project_changed_since(reference_mtime: float) -> bool:
+    """True if any real dbt project source file (models/macros/project
+    config - never target/dbt_packages/logs, which are outputs, not
+    inputs) is newer than `reference_mtime`."""
+    for path in DBT_PROJECT_DIR.rglob("*"):
+        if not path.is_file() or path.suffix not in _DBT_SOURCE_SUFFIXES:
+            continue
+        if _DBT_GENERATED_DIRS & set(path.relative_to(DBT_PROJECT_DIR).parts):
+            continue
+        if path.stat().st_mtime > reference_mtime:
+            return True
+    return False
+
+
+def _manifest_is_fresh() -> bool:
+    manifest_path = DBT_PROJECT.manifest_path
+    return manifest_path.exists() and not _dbt_project_changed_since(manifest_path.stat().st_mtime)
+
+
+# prepare_if_dev() (and the manual prepare() fallback for non-dev-CLI
+# callers, e.g. pytest) does a full `dbt parse` UNCONDITIONALLY on every
+# process that imports this module - including a fresh subprocess Dagster
+# spawns per run. Measured: ~45s per parse, dwarfing the actual pipeline
+# work it was gating (often under 1s). Skip it entirely when nothing that
+# would change the manifest has been touched since it was last generated -
+# a run process almost never needs a fresh parse, only an actual dbt
+# model/macro/project-config edit does. prepare_if_dev() only acts under
+# `dagster dev` (DAGSTER_IS_DEV_CLI) in the first place; the explicit
+# prepare() fallback below still runs whenever the manifest doesn't exist
+# yet at all (e.g. a first-ever run, or under plain pytest).
+if not _manifest_is_fresh():
+    DBT_PROJECT.prepare_if_dev()  # only actually reparses under real `dagster dev`
+    if not _manifest_is_fresh():  # still missing/stale (e.g. under pytest) - force it
+        DBT_PROJECT.preparer.prepare(DBT_PROJECT)
