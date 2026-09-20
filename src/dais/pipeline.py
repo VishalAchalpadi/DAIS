@@ -130,7 +130,12 @@ def run_pipeline(
     emitter.start("stage", run_id, inputs=[raw_target], outputs=[stage_target])
 
     validation = validate_dataframe(
-        parsed_df, spec.quality.rules, connector, spec.stage.business_key, spec.quality.quarantine.group_by
+        parsed_df,
+        spec.quality.rules,
+        connector,
+        spec.stage.business_key,
+        spec.quality.quarantine.group_by,
+        spec_name=spec.pipeline_name,
     )
     outcome = enforce_integrity_mode(validation, spec.quality)
 

@@ -1,31 +1,74 @@
 ---
 name: dais-local-stack
-description: Bring up the full local DAIS stack (API server, Dagster, Marquez), fix the recurring environment issues that break it, and author a new pipeline spec.yaml from a plain-language description of a data feed. Use whenever the user asks to start/restart Dagster, Marquez, or the DAIS API; asks why a UI or job is broken; or asks for a new spec.yaml.
+description: Bring up the full local DAIS stack (API server, Dagster, OpenMetadata), fix the recurring environment issues that break it, and author a new pipeline spec.yaml from a plain-language description of a data feed. Use whenever the user asks to start/restart Dagster, OpenMetadata, or the DAIS API; asks why a UI or job is broken; or asks for a new spec.yaml.
 ---
 
 # DAIS local stack: run it, fix it, author specs for it
 
 This skill captures everything learned running DAIS's local stack (its own
-FastAPI app, Dagster, and a from-source Marquez instance) end to end,
+FastAPI app, Dagster, and OpenMetadata as the lineage backend) end to end,
 including every environment bug hit and fixed along the way. Re-read this
 before touching any of these processes rather than rediscovering the same
 failures.
 
-## 1. The four services and how to start them
+**Lineage backend history**: Marquez was the original backend (from-source
+Java/Node, port 5000/1337). Phase 11b replaced it with OpenMetadata - not a
+drop-in swap, since OpenMetadata has no OpenLineage-compatible ingestion
+endpoint of its own (verified against the real server: its lineage model
+is entity-first - a lineage edge references existing entity ids, not an
+arbitrary OpenLineage namespace/name pair). Neither DAIS's own
+`lineage/emitter.py` nor dbt-ol changed at all for this swap - both still
+just POST standard OpenLineage RunEvents to `OPENLINEAGE_URL`. What changed
+is what's listening on the other end: `dais.lineage.openmetadata_forwarder`,
+a small FastAPI service that receives those events and translates them into
+OpenMetadata's entity + lineage-edge REST calls, still bound to
+`localhost:5000` so `OPENLINEAGE_URL=http://localhost:5000` never needed to
+change anywhere.
+
+## 1. The six services and how to start them
+
+Installed under `C:\Users\visha\tools\om-stack\` (outside the repo - large
+binaries, not tracked in git): `jdk21/` (OpenMetadata needs Java 21;
+system Java is 17, kept separate), `opensearch/` (bundles its own JDK),
+`openmetadata-2.0.2/`.
 
 | Service | Command | Required env vars |
 |---|---|---|
 | DAIS API (spec editor, quarantine UI, docs, pipeline trigger) | `python -m dais.api.main` from the repo root | `DAIS_API_KEY`, `SECRETS_PROVIDER=hardcoded`, `OPENLINEAGE_URL=http://localhost:5000` |
 | Dagster | `python -m dagster dev -f src/dais/orchestration/dagster/definitions.py` from the repo root | `DAGSTER_HOME`, `DAIS_API_KEY`, `SECRETS_PROVIDER=hardcoded`, `OPENLINEAGE_URL=http://localhost:5000` |
-| Marquez API | `java -jar <marquez-clone>/api/build/libs/marquez-api-*.jar server marquez.local.yml`, cwd = the marquez clone dir | none (reads `marquez.local.yml`) |
-| Marquez web | `npm run dev` from `<marquez-clone>/web`, needs Node on `PATH` | `MARQUEZ_HOST=localhost`, `MARQUEZ_PORT=5000` |
+| OpenSearch | `./bin/opensearch.bat` from `om-stack/opensearch` | `OPENSEARCH_JAVA_HOME=<om-stack>/opensearch/jdk` (its bundled JDK - the system `JAVA_HOME`/17 does NOT meet OpenSearch's Java 21 requirement and it will refuse to start) |
+| OpenMetadata server | see below (script's own classpath-building is `:`-joined, wrong for Windows java - invoke java directly instead) | `JAVA_HOME=<om-stack>/jdk21/jdk-21.0.12.1+1`, `DB_DRIVER_CLASS=org.postgresql.Driver`, `DB_SCHEME=postgresql`, `DB_USER=openmetadata_user`, `DB_USER_PASSWORD=openmetadata_password`, `DB_HOST=localhost`, `DB_PORT=5432`, `OM_DATABASE=openmetadata_db`, `SEARCH_TYPE=opensearch`, `ELASTICSEARCH_HOST=localhost`, `ELASTICSEARCH_PORT=9200`, `ELASTICSEARCH_SCHEME=http` |
+| OpenLineage-to-OpenMetadata forwarder | `python -m dais.lineage.openmetadata_forwarder` from the repo root | `OPENMETADATA_URL=http://localhost:8585/api/v1`, `OPENMETADATA_TOKEN=<bot token, see below>` |
+
+OpenMetadata server start command (bypasses `bin/openmetadata.sh`'s broken
+Windows classpath - build a `;`-joined one and invoke java directly, from
+`om-stack/openmetadata-2.0.2`):
+```
+CP=$(printf '%s;' libs/*.jar); CP_WIN=$(cygpath -w -p "$CP")
+"$JAVA_HOME/bin/java" -Xmx2g -Xms2g -Dbootstrap.dir="$(cygpath -w .)" -cp "$CP_WIN" \
+  org.openmetadata.service.OpenMetadataApplication server "$(cygpath -w conf/openmetadata.yaml)"
+```
+The bootstrap/migration step (`bootstrap/openmetadata-ops.sh drop-create`)
+has the same classpath bug - same fix, swap `drop-create` for the trailing
+arg and target class `org.openmetadata.service.util.OpenMetadataOperations`.
+Only needed once (or after wiping the `openmetadata_db` Postgres database).
+
+**The bot token**: `dais-lineage-bot` is a bot user (isAdmin, non-expiring
+JWT) created via the OpenMetadata API specifically so the forwarder never
+has to re-authenticate as `admin`. Its token is saved at
+`C:\Users\visha\tools\om-stack\bot_token.txt` - read it into
+`OPENMETADATA_TOKEN` rather than regenerating. If it's ever lost: log in as
+admin (`POST /api/v1/users/login`, `admin@open-metadata.org` /
+`YWRtaW4=` base64), then `PUT /api/v1/users/generateToken/<dais-lineage-bot's
+user id>` with `{"JWTTokenExpiry": "Unlimited"}`.
 
 URLs once up:
 - Dagster: `http://127.0.0.1:3000`
 - DAIS spec editor: `http://localhost:8000/ui/spec-editor` (and `/ui/spec-editor/<name>` to edit an existing one)
 - DAIS quarantine review: `http://localhost:8000/ui/quarantine/<spec_name>`
 - DAIS API docs: `http://localhost:8000/docs`
-- Marquez lineage graph: `http://localhost:1337`
+- Great Expectations Data Docs (validation run history): `http://localhost:8000/ui/great-expectations/index.html`
+- OpenMetadata UI (lineage graphs, entity catalog): `http://localhost:8585` (login `admin@open-metadata.org` / `admin`)
 
 API key for both DAIS UIs is whatever `DAIS_API_KEY` was set to (`dev-key` in this environment's convention).
 
@@ -45,21 +88,27 @@ just this same class of mistake recurring:
   authenticated - check VAULT_ADDR/VAULT_TOKEN` from whichever process you
   forgot.
 - `build_client()` (`src/dais/lineage/emitter.py`) only sends real
-  OpenLineage events to Marquez if `OPENLINEAGE_URL` is set in that
-  process's environment — otherwise it silently falls back to a
-  `ConsoleTransport` that logs locally and sends nothing, **with no error
-  at all**. This is the more dangerous of the two exactly because it fails
-  silently: a pipeline run reports `succeeded` normally, and the only
-  symptom is the run's job/dataset never appearing in Marquez. Both the
-  DAIS API server (pipeline lineage) and `dagster dev` (dbt-ol's gold
-  lineage) need it independently.
+  OpenLineage events to the forwarder (which then relays into
+  OpenMetadata) if `OPENLINEAGE_URL` is set in that process's environment
+  — otherwise it silently falls back to a `ConsoleTransport` that logs
+  locally and sends nothing, **with no error at all**. This is the more
+  dangerous of the two exactly because it fails silently: a pipeline run
+  reports `succeeded` normally, and the only symptom is the run's
+  job/table never appearing in OpenMetadata. Both the DAIS API server
+  (pipeline lineage) and `dagster dev` (dbt-ol's gold lineage) need it
+  independently. The forwarder itself failing (OpenMetadata down, bot
+  token stale) is *also* silent to the caller by design (see
+  `openmetadata_forwarder.py`'s docstring) - it logs a warning and still
+  acks the event, so check the forwarder's own stderr, not just whether
+  the pipeline run succeeded.
 
 Always set **all three** (`SECRETS_PROVIDER=hardcoded`, `DAIS_API_KEY`,
 `OPENLINEAGE_URL=http://localhost:5000`) before starting *every* Python
 process in this stack, not just the one you're thinking about at the time
-— and when something is missing from Marquez that you expected to see,
-check this before assuming the pipeline itself is broken: the run very
-likely succeeded, it just never emitted.
+— and when something is missing from OpenMetadata that you expected to
+see, check this (and that the forwarder + OpenMetadata + OpenSearch are
+all actually up) before assuming the pipeline itself is broken: the run
+very likely succeeded, it just never emitted.
 
 Local secrets live in `secrets.local.yaml` at the repo root (real content:
 `aurora_postgres_prod` → local Postgres creds).
@@ -126,6 +175,11 @@ Local secrets live in `secrets.local.yaml` at the repo root (real content:
   declared but never evaluated.
 
 ## 2. Marquez-from-source: known-fixed bugs, if ever rebuilding
+
+**Historical - Marquez is no longer part of this stack** (replaced by
+OpenMetadata, see section 1's lineage backend history note). Kept here
+only in case Marquez is ever reintroduced; nothing below applies to the
+current stack.
 
 The Marquez web clone needed several real fixes this session (not
 DAIS bugs — bugs/version drift in Marquez's own vendored dependencies).

@@ -1,19 +1,106 @@
-"""Row-level DQ validation: runs the pandera schema built from
-`quality.rules`, splits the batch into passing rows (cast to their
-`cast_to` types, ready for stage) and quarantined rows (original text +
-the reasons they failed), one DQ alert per quarantined row.
+"""Row-level DQ validation: runs the Great Expectations-backed checks built
+from `quality.rules` (see schema_registry.py), splits the batch into
+passing rows (cast to their `cast_to` types, ready for stage) and
+quarantined rows (original text + the reasons they failed), one DQ alert
+per quarantined row.
 """
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-import pandera.errors
+import great_expectations as gx
 import polars as pl
+from great_expectations.checkpoint import UpdateDataDocsAction
 
-from dais.quality.schema_registry import build_dataframe_schema
+from dais.quality.schema_registry import DataFrameValidation, build_dataframe_validation
 from dais.resilience.connectors.base import DatabaseConnector
 from dais.spec.models import QualityRule
+
+logger = logging.getLogger(__name__)
+
+# A single ephemeral GX context/pandas Data Source is reused across every
+# validate() call in this process - GX's metric/expectation registries and
+# context setup are process-global anyway (see schema_registry.py's custom
+# expectation classes, registered once at import time), so there is no
+# per-run isolation to gain from constructing a new context each time, only
+# avoidable overhead.
+_GX_CONTEXT = gx.get_context(mode="ephemeral")
+_GX_DATASOURCE = _GX_CONTEXT.data_sources.add_pandas(name="dais_row_validator")
+_GX_ASSET = _GX_DATASOURCE.add_dataframe_asset(name="batch")
+_GX_BATCH_DEFINITION = _GX_ASSET.add_batch_definition_whole_dataframe(name="whole_dataframe")
+
+_COMPLETE_RESULT_FORMAT = {"result_format": "COMPLETE"}
+
+# Data Docs: GX's own browsable HTML UI (expectation suites + validation run
+# history, one page per run, with sample failing rows per expectation).
+# ephemeral contexts ship with a default "local_site" pointed at a throwaway
+# temp dir; repoint it at a stable project-local directory so it survives
+# across runs/processes and can be served by the API (see /ui/great-expectations
+# in api/app.py). Building docs is best-effort and must never break a
+# pipeline run - if it fails for any reason, log and continue.
+GX_DATA_DOCS_DIR = Path(os.environ.get("DAIS_GX_DATA_DOCS_DIR", "gx_data_docs")).resolve()
+_GX_CONTEXT.update_data_docs_site(
+    site_name="local_site",
+    site_config={
+        "class_name": "SiteBuilder",
+        "show_how_to_buttons": True,
+        "store_backend": {
+            "class_name": "TupleFilesystemStoreBackend",
+            "base_directory": str(GX_DATA_DOCS_DIR),
+        },
+        "site_index_builder": {"class_name": "DefaultSiteIndexBuilder"},
+    },
+)
+
+_GX_CHECKPOINT_CACHE: dict[str, Any] = {}
+
+
+def _get_or_build_checkpoint(spec_name: str, validation: DataFrameValidation):
+    """One suite/validation-definition/checkpoint per spec, reused (and kept
+    up to date via add_or_update) across runs so Data Docs accumulates real
+    run history per pipeline instead of one-off, unrelated pages."""
+    checkpoint = _GX_CHECKPOINT_CACHE.get(spec_name)
+    if checkpoint is not None:
+        return checkpoint
+
+    suite = gx.ExpectationSuite(name=spec_name)
+    for col_expectation in validation.expectations:
+        suite.add_expectation(col_expectation.expectation)
+    suite = _GX_CONTEXT.suites.add_or_update(suite)
+
+    validation_definition = _GX_CONTEXT.validation_definitions.add_or_update(
+        gx.ValidationDefinition(name=spec_name, data=_GX_BATCH_DEFINITION, suite=suite)
+    )
+    checkpoint = _GX_CONTEXT.checkpoints.add_or_update(
+        gx.Checkpoint(
+            name=spec_name,
+            validation_definitions=[validation_definition],
+            actions=[UpdateDataDocsAction(name="update_data_docs")],
+            result_format=_COMPLETE_RESULT_FORMAT,
+        )
+    )
+    _GX_CHECKPOINT_CACHE[spec_name] = checkpoint
+    return checkpoint
+
+
+def _update_data_docs(spec_name: str, pandas_df, validation: DataFrameValidation) -> None:
+    """Runs the same expectations a second time through a GX Checkpoint
+    purely to populate Data Docs. Deliberately independent of
+    _run_expectations' own per-expectation batch.validate() calls below,
+    which compute the row_index -> reasons mapping the quarantine JSON
+    contract depends on - this function's failures/exceptions must never
+    change that outcome."""
+    if not validation.expectations:
+        return
+    try:
+        checkpoint = _get_or_build_checkpoint(spec_name, validation)
+        checkpoint.run(batch_parameters={"dataframe": pandas_df})
+    except Exception:
+        logger.warning("failed to update Great Expectations Data Docs for %r", spec_name, exc_info=True)
 
 
 @dataclass
@@ -49,20 +136,43 @@ def _duplicate_business_key_indices(df: pl.DataFrame, business_key: list[str]) -
     return failures
 
 
-def _failing_indices(df: pl.DataFrame, rules: list[QualityRule], connector: DatabaseConnector | None) -> dict[int, list[str]]:
-    schema = build_dataframe_schema(rules, connector)
-    try:
-        schema.validate(df, lazy=True)
-        return {}
-    except pandera.errors.SchemaErrors as exc:
-        failures: dict[int, list[str]] = {}
-        for rec in exc.failure_cases.to_dicts():
-            idx = rec["index"]
-            if idx is None:
-                continue
-            reason = f"{rec['column']}: {rec['check']}"
+def _run_expectations(pandas_df, validation: DataFrameValidation, spec_name: str) -> dict[int, list[str]]:
+    failures: dict[int, list[str]] = {}
+    batch = _GX_BATCH_DEFINITION.get_batch(batch_parameters={"dataframe": pandas_df})
+    for col_expectation in validation.expectations:
+        result = batch.validate(col_expectation.expectation, result_format=_COMPLETE_RESULT_FORMAT)
+        if result.success:
+            continue
+        reason = f"{col_expectation.column}: {col_expectation.label}"
+        for idx in result.result["unexpected_index_list"]:
             failures.setdefault(idx, []).append(reason)
-        return failures
+    _update_data_docs(spec_name, pandas_df, validation)
+    return failures
+
+
+def _run_sql_lookups(
+    df: pl.DataFrame, validation: DataFrameValidation, connector: DatabaseConnector | None
+) -> dict[int, list[str]]:
+    if not validation.sql_lookups:
+        return {}
+    if connector is None:
+        raise ValueError("a quality rule has a SQL lookup but no connector was provided")
+    failures: dict[int, list[str]] = {}
+    for lookup in validation.sql_lookups:
+        reason = f"{lookup.column}: sql_lookup"
+        for idx in lookup.failing_indices(df, connector):
+            failures.setdefault(idx, []).append(reason)
+    return failures
+
+
+def _failing_indices(
+    df: pl.DataFrame, rules: list[QualityRule], connector: DatabaseConnector | None, spec_name: str
+) -> dict[int, list[str]]:
+    validation = build_dataframe_validation(rules)
+    failures = _run_expectations(df.to_pandas(), validation, spec_name)
+    for idx, reasons in _run_sql_lookups(df, validation, connector).items():
+        failures.setdefault(idx, []).extend(reasons)
+    return failures
 
 
 def _apply_casts(df: pl.DataFrame, rules: list[QualityRule]) -> pl.DataFrame:
@@ -105,11 +215,12 @@ def validate_dataframe(
     connector: DatabaseConnector | None = None,
     business_key: list[str] | None = None,
     group_by: list[str] | None = None,
+    spec_name: str = "adhoc",
 ) -> ValidationResult:
     if df.height == 0:
         return ValidationResult(valid_df=_apply_casts(df, rules), quarantined_rows=[])
 
-    failures = _failing_indices(df, rules, connector)
+    failures = _failing_indices(df, rules, connector, spec_name)
 
     if business_key:
         for idx, reasons in _duplicate_business_key_indices(df, business_key).items():

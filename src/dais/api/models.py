@@ -45,6 +45,11 @@ class QuarantineRecordSummaryResponse(BaseModel):
     row_count: int
 
 
+class QuarantineSpecSummaryResponse(BaseModel):
+    spec_name: str
+    pending_count: int
+
+
 class QuarantinedRowPayload(BaseModel):
     row_index: int
     row_data: dict

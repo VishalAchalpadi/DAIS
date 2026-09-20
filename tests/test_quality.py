@@ -298,6 +298,75 @@ def test_write_quarantine_local_creates_directory_if_missing(tmp_path):
     assert (tmp_path / "quarantine").is_dir()
 
 
+# ---------------------------------------------------------------------------
+# Phase 11a regression: the quarantined-row JSON contract the exception
+# remediation UI consumes must be byte-for-byte/field-for-field identical
+# to what it was under pandera. This reproduces the exact scenario recorded
+# as the pre-swap baseline (a real holdings_ingest run with account_id
+# blanked out on one row - see the Phase 11 baseline capture): the same
+# input must still produce the same row_index, the same row_data, and the
+# same reasons string. quarantined_at is checked only for being a valid
+# ISO8601 UTC timestamp (a wall-clock value, never expected to be identical
+# across runs).
+# ---------------------------------------------------------------------------
+
+def test_known_bad_row_produces_unchanged_quarantine_json_contract(tmp_path):
+    from datetime import datetime
+
+    df = pl.DataFrame(
+        {
+            "account_id": ["", "ACC0002"],
+            "security_id": ["SEC0001", "SEC0002"],
+            "as_of_date": ["20260101", "20260101"],
+            "quantity": ["10.5000", "20.5000"],
+            "market_value": ["1000.25", "2000.25"],
+            "currency": ["EUR", "GBP"],
+        }
+    )
+    rules = QualityConfig(
+        integrity_mode="row_level",
+        rules=[
+            {"column": "account_id", "checks": ["not_null", "non_empty"]},
+            {"column": "security_id", "checks": ["not_null", "non_empty"]},
+            {"column": "as_of_date", "checks": ["not_null", "valid_date"], "format": "%Y%m%d"},
+            {"column": "quantity", "checks": ["not_null", "is_numeric", {"greater_than_or_equal": 0}]},
+            {"column": "market_value", "checks": ["not_null", "is_numeric"]},
+            {"column": "currency", "checks": ["not_null"]},
+        ],
+        quarantine={
+            "kind": "local",
+            "location": str(tmp_path / "quarantine"),
+            "alert": {"channel": "log", "destination": "n/a"},
+        },
+    ).rules
+
+    result = validate_dataframe(df, rules)
+    assert len(result.quarantined_rows) == 1
+
+    quality_cfg = _local_quality_cfg(tmp_path)
+    write_quarantine(result.quarantined_rows, quality_cfg, "HOLDINGS_20260917_baseline_bad.txt")
+
+    payload = json.loads((tmp_path / "quarantine").glob("*").__next__().read_text(encoding="utf-8"))
+    assert len(payload) == 1
+    record = payload[0]
+
+    # Exact match against the recorded pre-swap (pandera) baseline.
+    assert record["row_index"] == 0
+    assert record["row_data"] == {
+        "account_id": "",
+        "security_id": "SEC0001",
+        "as_of_date": "20260101",
+        "quantity": "10.5000",
+        "market_value": "1000.25",
+        "currency": "EUR",
+    }
+    assert record["reasons"] == ["account_id: non_empty"]
+    assert set(record.keys()) == {"row_index", "row_data", "reasons", "quarantined_at"}
+    # ISO8601 UTC, parseable - the one field that's a wall-clock value and
+    # was never expected to be identical across runs.
+    datetime.fromisoformat(record["quarantined_at"])
+
+
 def test_write_raw_file_quarantine_local_writes_original_bytes(tmp_path):
     quality_cfg = _local_quality_cfg(tmp_path)
     raw_bytes = b"portfolio_cd,as_of_date\nPORT0001,2026-08-30\n"

@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from dais.api.models import (
@@ -18,6 +19,7 @@ from dais.api.models import (
     BusinessProcessStatusResponse,
     QuarantinedRowPayload,
     QuarantineRecordSummaryResponse,
+    QuarantineSpecSummaryResponse,
     ResubmitFailure,
     ResubmitRequest,
     ResubmitResponse,
@@ -25,6 +27,7 @@ from dais.api.models import (
     RunResponse,
     RunStatusResponse,
 )
+from dais.api.quarantine_overview_ui import QUARANTINE_OVERVIEW_HTML
 from dais.api.quarantine_ui import QUARANTINE_UI_HTML
 from dais.api.runs import RunRegistry
 from dais.api.spec_editor import SPEC_EDITOR_HTML
@@ -33,6 +36,7 @@ from dais.business_process.evaluator import evaluate_business_process
 from dais.business_process.loader import BusinessProcessLoadError, load_business_process
 from dais.db import build_connector_for_spec, build_s3_connector_for_spec
 from dais.quality.quarantine_review import list_quarantine_records, read_quarantine_record, resubmit_corrections
+from dais.quality.row_validator import GX_DATA_DOCS_DIR
 from dais.spec.loader import SpecLoadError, load_spec
 from dais.spec.models import BARE_CHECK_NAMES, COMPARISON_CHECK_OPS, PipelineSpec
 
@@ -155,6 +159,39 @@ def create_app(
         )
 
     @app.get(
+        "/pipelines/quarantine-summary",
+        response_model=list[QuarantineSpecSummaryResponse],
+        dependencies=[Depends(check_api_key)],
+    )
+    def quarantine_summary() -> list[QuarantineSpecSummaryResponse]:
+        """One entry per pipeline that currently has at least one pending
+        quarantine record - the exceptions overview page's tile list. A
+        pipeline whose records have all been resolved simply stops
+        appearing here on the next fetch; there is no separate "resolved"
+        state to track. Best-effort per spec: a pipeline whose quarantine
+        backend can't be reached right now (e.g. no AWS credentials
+        configured locally for an s3-kind spec) is skipped rather than
+        failing the whole overview for every other pipeline."""
+        summaries = []
+        for spec_path in sorted(specs_dir.glob("*.yaml")):
+            if spec_path.stem.endswith(".dq_suggestions"):
+                continue
+            try:
+                spec = load_spec(spec_path)
+            except SpecLoadError:
+                continue
+            try:
+                s3 = s3_factory(spec) if spec.quality.quarantine.kind == "s3" else None
+                records = list_quarantine_records(spec, s3)
+            except Exception:
+                continue
+            if records:
+                summaries.append(
+                    QuarantineSpecSummaryResponse(spec_name=spec.pipeline_name, pending_count=len(records))
+                )
+        return summaries
+
+    @app.get(
         "/pipelines/{spec_name}/quarantine",
         response_model=list[QuarantineRecordSummaryResponse],
         dependencies=[Depends(check_api_key)],
@@ -209,6 +246,10 @@ def create_app(
             layer_reached=outcome.layer_reached,
             gold_error=outcome.gold_error,
         )
+
+    @app.get("/ui/quarantine", response_class=HTMLResponse, include_in_schema=False)
+    def quarantine_overview_ui() -> str:
+        return QUARANTINE_OVERVIEW_HTML
 
     @app.get("/ui/quarantine/{spec_name}", response_class=HTMLResponse, include_in_schema=False)
     def quarantine_ui(spec_name: str) -> str:
@@ -271,5 +312,16 @@ def create_app(
     @app.get("/ui/spec-editor/{spec_name}", response_class=HTMLResponse, include_in_schema=False)
     def spec_editor_edit(spec_name: str) -> str:
         return SPEC_EDITOR_HTML.replace("__SPEC_NAME__", spec_name)
+
+    # Great Expectations' own Data Docs site: real expectation suites and
+    # validation run history, rebuilt after every DQ validation (see
+    # quality/row_validator.py). Static files, so mounted directly rather
+    # than proxied through a route per page.
+    GX_DATA_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    app.mount(
+        "/ui/great-expectations",
+        StaticFiles(directory=GX_DATA_DOCS_DIR, html=True),
+        name="great_expectations_data_docs",
+    )
 
     return app

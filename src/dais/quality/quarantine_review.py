@@ -137,7 +137,9 @@ def resubmit_corrections(
         [row["row_data"] for row in corrected_rows], schema={c: pl.Utf8 for c in columns}
     )
 
-    validation = validate_dataframe(df, spec.quality.rules, connector, spec.stage.business_key)
+    validation = validate_dataframe(
+        df, spec.quality.rules, connector, spec.stage.business_key, spec_name=spec.pipeline_name
+    )
     if validation.quarantined_rows:
         failures = [
             {"row_index": corrected_rows[q.row_index]["row_index"], "reasons": q.reasons}

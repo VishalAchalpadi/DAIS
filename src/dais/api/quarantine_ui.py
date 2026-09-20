@@ -20,16 +20,19 @@ QUARANTINE_UI_HTML = """<!doctype html>
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #f5f6f8;
+    /* Geode Capital Management brand palette */
+    --bg: #ffffff;
     --surface: #ffffff;
-    --surface-2: #eef0f3;
-    --border: #dde1e6;
-    --text: #1b1f24;
-    --text-dim: #62697a;
-    --accent: #2f6fed;
+    --surface-2: #f1f5f2;
+    --border: #dbe5df;
+    --text: #141414;
+    --text-dim: #5c6b62;
+    --accent: #2f5941;
     --accent-text: #ffffff;
-    --ok-bg: #e5f6ec;
-    --ok-text: #1c7c4d;
+    --accent-secondary: #6fa37d;
+    --brand-gold: #c99a2e;
+    --ok-bg: #e9f3ec;
+    --ok-text: #2f5941;
     --err-bg: #fdecec;
     --err-text: #b3261e;
     --danger-text: #b3261e;
@@ -38,16 +41,18 @@ QUARANTINE_UI_HTML = """<!doctype html>
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #14171c;
-      --surface: #1c2028;
-      --surface-2: #232830;
-      --border: #333a45;
-      --text: #e7e9ed;
-      --text-dim: #9aa2b1;
-      --accent: #6ea2ff;
-      --accent-text: #0b1220;
-      --ok-bg: #123425;
-      --ok-text: #4fd88a;
+      --bg: #0f1411;
+      --surface: #171d19;
+      --surface-2: #202a24;
+      --border: #33413a;
+      --text: #f2f5f3;
+      --text-dim: #9ab0a2;
+      --accent: #7cc49b;
+      --accent-text: #0f1411;
+      --accent-secondary: #4f8f6c;
+      --brand-gold: #e8be5a;
+      --ok-bg: #163326;
+      --ok-text: #7cc49b;
       --err-bg: #3a1717;
       --err-text: #ff8a80;
       --danger-text: #ff8a80;
@@ -64,7 +69,7 @@ QUARANTINE_UI_HTML = """<!doctype html>
     line-height: 1.5;
   }
   header { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 1.75rem; }
-  .eyebrow { font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
+  .eyebrow { font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--brand-gold); font-weight: 700; }
   h1 { font-size: 1.5rem; margin: 0; font-weight: 650; }
   h1 code { font-family: var(--font-mono); font-weight: 600; background: var(--surface-2); padding: 0.1rem 0.4rem; border-radius: 5px; font-size: 0.85em; }
   h2 { font-size: 1.02rem; font-weight: 600; margin: 0 0 0.35rem; }
@@ -123,6 +128,7 @@ QUARANTINE_UI_HTML = """<!doctype html>
   <header>
     <span class="eyebrow">DAIS &middot; data quality</span>
     <h1>Quarantine review &mdash; <code>__SPEC_NAME__</code></h1>
+    <a href="/ui/quarantine" style="color: var(--text-dim); font-size: 0.85rem;">&larr; All specs</a>
   </header>
 
   <div class="card">

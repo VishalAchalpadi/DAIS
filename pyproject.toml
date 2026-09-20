@@ -7,7 +7,6 @@ readme = "README.md"
 dependencies = [
     "pydantic>=2.6",
     "pyyaml>=6.0",
-    "pandera>=0.19",
     "tenacity>=8.2",
     "openlineage-python>=1.13",
     "openlineage-dbt>=1.13",
@@ -33,6 +32,7 @@ dependencies = [
     "dagster-webserver>=1.8",
     "dagster-dbt>=0.24",
     "requests>=2.31",
+    "great-expectations>=1.23.0",
 ]
 
 [project.scripts]
