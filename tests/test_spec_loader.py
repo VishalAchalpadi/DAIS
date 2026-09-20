@@ -366,3 +366,56 @@ def test_scd_type_only_accepts_2():
     data["gold"]["scd_key"] = ["account_id"]
     with pytest.raises(ValidationError):
         PipelineSpec.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# source.location.multi_file
+# ---------------------------------------------------------------------------
+
+def test_multi_file_valid_shape_accepted():
+    data = _load_dict(VALID_SPEC)
+    data["source"]["location"]["multi_file"] = {"mode": "latest"}
+    spec = PipelineSpec.model_validate(data)
+    assert spec.source.location.multi_file.mode == "latest"
+    assert spec.source.location.multi_file.order_by == "arrival_time"
+    assert spec.source.location.multi_file.on_earlier_failure == "continue"
+
+
+def test_multi_file_filename_timestamp_requires_format():
+    data = _load_dict(VALID_SPEC)
+    data["source"]["location"]["multi_file"] = {"mode": "all", "order_by": "filename_timestamp"}
+    with pytest.raises(ValidationError, match="filename_timestamp_format is required"):
+        PipelineSpec.model_validate(data)
+
+
+def test_multi_file_filename_timestamp_requires_a_pattern_token():
+    data = _load_dict(VALID_SPEC)
+    data["source"]["location"]["file_pattern"] = "HOLDINGS.txt"  # no {token}
+    data["source"]["location"]["multi_file"] = {
+        "mode": "all",
+        "order_by": "filename_timestamp",
+        "filename_timestamp_format": "%Y%m%d",
+    }
+    with pytest.raises(ValidationError, match="must contain a"):
+        PipelineSpec.model_validate(data)
+
+
+def test_multi_file_requires_file_pattern():
+    data = _load_dict(VALID_SPEC)
+    data["source"]["location"]["file_pattern"] = None
+    data["source"]["location"]["multi_file"] = {"mode": "latest"}
+    with pytest.raises(ValidationError, match="requires file_pattern"):
+        PipelineSpec.model_validate(data)
+
+
+def test_multi_file_pattern_rejects_more_than_one_token():
+    data = _load_dict(VALID_SPEC)
+    data["source"]["location"]["file_pattern"] = "HOLDINGS_{date}_{region}.txt"
+    data["source"]["location"]["multi_file"] = {"mode": "all"}
+    with pytest.raises(ValidationError, match="at most one"):
+        PipelineSpec.model_validate(data)
+
+
+def test_multi_file_absent_by_default():
+    spec = load_spec(REFERENCE_SPEC)
+    assert spec.source.location.multi_file is None

@@ -18,7 +18,7 @@ class RunRecord:
     spec_name: str
     file_path: str
     checksum: str
-    status: str  # "running" | "succeeded" | "failed" | "quarantined"
+    status: str  # "running" | "succeeded" | "failed" | "quarantined" | "skipped"
     layer_reached: str | None = None
     error: str | None = None
     quarantine_location: str | None = None
@@ -64,3 +64,14 @@ class RunRegistry:
             record = self._by_run_id[run_id]
             record.status = "failed"
             record.error = error
+
+    def mark_skipped(self, run_id: str) -> None:
+        """A run_id allocated as part of an "all"-mode multi-file batch
+        that never actually executed, because an earlier file in the same
+        batch failed under on_earlier_failure: "stop". Distinct from
+        "failed" (this run itself never ran) and from the initial
+        "running" (which would otherwise be misleadingly permanent)."""
+        with self._lock:
+            record = self._by_run_id[run_id]
+            record.status = "skipped"
+            record.error = "skipped: an earlier file in this batch failed"

@@ -23,18 +23,26 @@ from dais.api.models import (
     ResubmitFailure,
     ResubmitRequest,
     ResubmitResponse,
+    RunBatchResponse,
     RunRequest,
     RunResponse,
     RunStatusResponse,
 )
 from dais.api.quarantine_overview_ui import QUARANTINE_OVERVIEW_HTML
 from dais.api.quarantine_ui import QUARANTINE_UI_HTML
-from dais.api.runs import RunRegistry
+from dais.api.runs import RunRecord, RunRegistry
 from dais.api.spec_editor import SPEC_EDITOR_HTML
-from dais.api.worker import ConnectorFactory, S3Factory, execute_pipeline_background
+from dais.api.worker import (
+    ConnectorFactory,
+    S3Factory,
+    execute_multi_file_background,
+    execute_pipeline_background,
+)
 from dais.business_process.evaluator import evaluate_business_process
 from dais.business_process.loader import BusinessProcessLoadError, load_business_process
 from dais.db import build_connector_for_spec, build_s3_connector_for_spec
+from dais.ingestion.file_discovery import FileDiscoveryError, resolve_files
+from dais.pipeline import _read_source_bytes
 from dais.quality.quarantine_review import list_quarantine_records, read_quarantine_record, resubmit_corrections
 from dais.quality.row_validator import GX_DATA_DOCS_DIR
 from dais.spec.loader import SpecLoadError, load_spec
@@ -67,34 +75,79 @@ def create_app(
     @app.post(
         "/pipelines/{spec_name}/run",
         status_code=status.HTTP_202_ACCEPTED,
-        response_model=RunResponse,
+        response_model=RunResponse | RunBatchResponse,
         dependencies=[Depends(check_api_key)],
     )
-    def trigger_run(spec_name: str, req: RunRequest, background_tasks: BackgroundTasks) -> RunResponse:
+    def trigger_run(
+        spec_name: str, req: RunRequest, background_tasks: BackgroundTasks
+    ) -> RunResponse | RunBatchResponse:
         spec = load_spec_or_404(spec_name)
 
+        def dispatch_one(file_path: str) -> tuple[RunRecord, bool]:
+            """Checksum-dedup + registry.create for one file - shared by
+            the explicit file_path path and every discovery branch below.
+            Returns (record, already_ran) - already_ran means an earlier
+            trigger already has a record for this exact checksum, so the
+            caller must NOT queue another execution for it."""
+            s3 = s3_factory(spec) if file_path.startswith("s3://") else None
+            try:
+                file_bytes = _read_source_bytes(file_path, s3)
+            except OSError as exc:
+                raise HTTPException(status_code=400, detail=f"could not read file_path: {exc}") from exc
+            checksum = hashlib.sha256(file_bytes).hexdigest()
+
+            existing = registry.find_by_checksum(spec_name, checksum)
+            if existing is not None:
+                return existing, True
+            return registry.create(spec_name, file_path, checksum), False
+
+        def dispatch_single(file_path: str) -> RunResponse:
+            record, already_ran = dispatch_one(file_path)
+            if not already_ran:
+                background_tasks.add_task(
+                    execute_pipeline_background,
+                    registry,
+                    spec,
+                    file_path,
+                    connector_factory,
+                    record.run_id,
+                    req.stop_after,
+                    s3_factory,
+                )
+            return RunResponse(run_id=record.run_id, status=record.status)
+
+        if req.file_path is not None:
+            return dispatch_single(req.file_path)
+
+        location = spec.source.location
+        if location.multi_file is None:
+            raise HTTPException(
+                status_code=400,
+                detail="file_path is required (spec has no source.location.multi_file configured)",
+            )
         try:
-            file_bytes = Path(req.file_path).read_bytes()
-        except OSError as exc:
-            raise HTTPException(status_code=400, detail=f"could not read file_path: {exc}") from exc
-        checksum = hashlib.sha256(file_bytes).hexdigest()
+            resolved = resolve_files(location, s3_factory(spec) if location.kind == "s3" else None)
+        except FileDiscoveryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        existing = registry.find_by_checksum(spec_name, checksum)
-        if existing is not None:
-            return RunResponse(run_id=existing.run_id, status=existing.status)
+        if len(resolved) == 1:
+            return dispatch_single(resolved[0].path)
 
-        record = registry.create(spec_name, req.file_path, checksum)
+        ordered_runs: list[tuple[str, str, bool]] = []
+        for discovered in resolved:
+            record, already_ran = dispatch_one(discovered.path)
+            ordered_runs.append((record.run_id, discovered.path, already_ran))
         background_tasks.add_task(
-            execute_pipeline_background,
+            execute_multi_file_background,
             registry,
             spec,
-            req.file_path,
+            ordered_runs,
+            location.multi_file.on_earlier_failure,
             connector_factory,
-            record.run_id,
             req.stop_after,
             s3_factory,
         )
-        return RunResponse(run_id=record.run_id, status=record.status)
+        return RunBatchResponse(run_ids=[r[0] for r in ordered_runs], status="running")
 
     @app.get(
         "/pipelines/runs/{run_id}/status",

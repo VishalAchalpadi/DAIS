@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Callable, TypeVar
 
 import boto3
@@ -42,6 +43,19 @@ class S3Connector:
         def _do():
             response = self._client.list_objects_v2(Bucket=bucket, Prefix=prefix)
             return [obj["Key"] for obj in response.get("Contents", [])]
+
+        return self._run(_do)
+
+    def list_objects_with_last_modified(self, bucket: str, prefix: str) -> list[tuple[str, datetime]]:
+        """Same listing as list_objects, but paired with each object's
+        LastModified - used by file_discovery.py's arrival-time ordering.
+        A separate method (not a change to list_objects' return shape)
+        since quarantine_review.py already depends on list_objects
+        returning a plain list[str]."""
+
+        def _do():
+            response = self._client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+            return [(obj["Key"], obj["LastModified"]) for obj in response.get("Contents", [])]
 
         return self._run(_do)
 
