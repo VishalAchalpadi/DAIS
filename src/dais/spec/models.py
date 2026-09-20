@@ -12,6 +12,7 @@ from typing import Any, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _PLACEHOLDER_RE = re.compile(r"^<<.*>>$")
+_PATTERN_TOKEN_RE = re.compile(r"\{(\w+)\}")
 
 
 def _reject_placeholder(v: str) -> str:
@@ -58,12 +59,64 @@ class MonitoringConfig(StrictModel):
 # source
 # ---------------------------------------------------------------------------
 
+class MultiFileSelection(StrictModel):
+    """Configures how a pipeline trigger picks which file(s) to process
+    when `SourceLocation.file_pattern` matches more than one file in
+    `location.path` at trigger time (see `dais.ingestion.file_discovery`).
+    Absent (the default on SourceLocation), a trigger must always name an
+    exact file_path, exactly as before this feature existed."""
+
+    mode: Literal["latest", "earliest", "all"]
+    order_by: Literal["arrival_time", "filename_timestamp"] = "arrival_time"
+    # strptime format for the substring the pattern's single {...} token
+    # matches (e.g. "%Y%m%d" for "HOLDINGS_{date}.txt") - required, and
+    # only meaningful, when order_by is filename_timestamp.
+    filename_timestamp_format: str | None = None
+    # Only meaningful when mode == "all" - processing order for the
+    # resolved files.
+    order: Literal["asc", "desc"] = "asc"
+    # Only meaningful when mode == "all" - "stop" halts the rest of the
+    # batch (marking them "skipped") the first time a file's run status
+    # comes back exactly "failed" (not "quarantined" - a quarantined run
+    # completed normally and landed its good rows). Use "stop" when later
+    # files are deltas/corrections that assume an earlier file already
+    # landed; "continue" (default) suits independent-snapshot files.
+    on_earlier_failure: Literal["continue", "stop"] = "continue"
+
+    @model_validator(mode="after")
+    def _timestamp_format_required(self) -> "MultiFileSelection":
+        if self.order_by == "filename_timestamp" and not self.filename_timestamp_format:
+            raise ValueError(
+                "filename_timestamp_format is required when order_by is filename_timestamp"
+            )
+        return self
+
+
 class SourceLocation(StrictModel):
     kind: Literal["s3", "local"]
     path: str
     file_pattern: str | None = None
+    multi_file: MultiFileSelection | None = None
 
     _v_path = field_validator("path")(_reject_placeholder)
+
+    @model_validator(mode="after")
+    def _multi_file_requires_pattern(self) -> "SourceLocation":
+        if self.multi_file is None:
+            return self
+        if not self.file_pattern:
+            raise ValueError("multi_file requires file_pattern to be set")
+        token_count = len(_PATTERN_TOKEN_RE.findall(self.file_pattern))
+        if token_count > 1:
+            raise ValueError(
+                f"file_pattern must contain at most one {{token}}, got {self.file_pattern!r}"
+            )
+        if self.multi_file.order_by == "filename_timestamp" and token_count == 0:
+            raise ValueError(
+                "file_pattern must contain a {token} (e.g. \"HOLDINGS_{date}.txt\") "
+                "when multi_file.order_by is filename_timestamp"
+            )
+        return self
 
 
 class SourceConfig(StrictModel):

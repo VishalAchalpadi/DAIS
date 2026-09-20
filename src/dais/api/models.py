@@ -4,12 +4,25 @@ from pydantic import BaseModel
 
 
 class RunRequest(BaseModel):
-    file_path: str
+    # Omit to have the server discover the file(s) to process from the
+    # spec's source.location (requires location.multi_file to be set) -
+    # see dais.ingestion.file_discovery.
+    file_path: str | None = None
     stop_after: str | None = None
 
 
 class RunResponse(BaseModel):
     run_id: str
+    status: str
+
+
+class RunBatchResponse(BaseModel):
+    """Returned instead of RunResponse when file_path was omitted and
+    the spec's source.location.multi_file.mode resolved to more than one
+    file ("all" mode) - one run_id per resolved file, in processing
+    order. Poll each via GET /pipelines/runs/{run_id}/status."""
+
+    run_ids: list[str]
     status: str
 
 

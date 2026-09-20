@@ -43,6 +43,15 @@ class DaisApiResource(ConfigurableResource):
         return {"X-API-Key": self.api_key} if self.api_key else {}
 
     def trigger_run(self, spec_name: str, file_path: str, stop_after: str | None = None) -> str:
+        return self.trigger(spec_name, file_path, stop_after)["run_id"]
+
+    def trigger(self, spec_name: str, file_path: str | None = None, stop_after: str | None = None) -> dict:
+        """Raw trigger response - {"run_id": ...} (RunResponse) or
+        {"run_ids": [...]} (RunBatchResponse, when file_path is omitted
+        and the spec's source.location.multi_file resolves to more than
+        one file - see dais.ingestion.file_discovery). trigger_run/
+        run_and_wait assume the single-run shape; run_and_wait_many
+        handles either."""
         resp = requests.post(
             f"{self.base_url}/pipelines/{spec_name}/run",
             json={"file_path": file_path, "stop_after": stop_after},
@@ -50,7 +59,7 @@ class DaisApiResource(ConfigurableResource):
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.json()["run_id"]
+        return resp.json()
 
     def get_status(self, run_id: str) -> dict:
         resp = requests.get(
@@ -85,3 +94,24 @@ class DaisApiResource(ConfigurableResource):
                 run_id, result["status"], result.get("error"), result.get("failure_reasons", [])
             )
         return result
+
+    def run_and_wait_many(self, spec_name: str, stop_after: str | None = None) -> list[dict]:
+        """Discovery path: file_path omitted, server resolves the spec's
+        source.location.multi_file itself (one file for "latest"/
+        "earliest", N files in order for "all"). Waits for every
+        resulting run in turn (mirroring the server's own sequential
+        execution) and raises on the first one that didn't succeed -
+        including "skipped" (an earlier file in the batch failed under
+        on_earlier_failure: "stop"), which is deliberately not treated as
+        success here either."""
+        response = self.trigger(spec_name, file_path=None, stop_after=stop_after)
+        run_ids = response["run_ids"] if "run_ids" in response else [response["run_id"]]
+        results = []
+        for run_id in run_ids:
+            result = self.wait_for_completion(run_id)
+            results.append(result)
+            if result["status"] != "succeeded":
+                raise DaisApiRunFailedError(
+                    run_id, result["status"], result.get("error"), result.get("failure_reasons", [])
+                )
+        return results
