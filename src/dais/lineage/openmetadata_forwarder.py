@@ -121,9 +121,14 @@ def _ensure_pipeline_entity(namespace: str, job_name: str) -> str:
         "services/pipelineServices",
         {
             "name": service_name,
-            "serviceType": "Airflow",
+            "serviceType": "Dagster",
             "connection": {
-                "config": {"type": "Airflow", "hostPort": "http://localhost:8080", "connection": {"type": "Backend"}}
+                # Descriptive only, like the Postgres connection config in
+                # _ensure_table_entity - lineage edges are written directly
+                # via this API, OpenMetadata never actually connects out
+                # using this config. DAIS orchestrates through Dagster
+                # (src/dais/orchestration/dagster/), not Airflow.
+                "config": {"type": "Dagster", "host": "http://localhost:3000", "token": "unset"}
             },
         },
     )
