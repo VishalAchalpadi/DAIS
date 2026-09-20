@@ -1,0 +1,126 @@
+# =========================================================================
+# Pipeline Spec: portfolio_holdings_ingest
+#
+# Daily portfolio holdings (shares/price/currency/fx by security) - a
+# demo pipeline for the multi-file selection feature
+# (source.location.multi_file): several intraday resubmissions of the
+# same portfolio/security/date positions (revised share counts) land
+# through one directory, processed in arrival order, each upserting over
+# the last on (portfolio, security, date) - the final gold table reflects
+# whichever file arrived last.
+#
+# Header casing note: the real source file's header ("Date", "Portfolio",
+# "Shares", ...) is inconsistently capitalized - normalized to lowercase
+# snake_case here to match every other spec's convention (Postgres would
+# otherwise quote-preserve the exact mixed case from the header).
+# =========================================================================
+
+pipeline_name: portfolio_holdings_ingest
+description: "Ingests daily portfolio holdings CSV files (shares/price/fx by security/portfolio) into raw/stage, with a gold model computing market value and portfolio weight"
+owner: "data-eng-team"
+
+execution:
+  stop_after: gold
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: csv
+  location:
+    kind: local
+    path: "./scratch_portfolio_demo/landing/"
+    file_pattern: "PORTFOLIO_HOLDINGS_{date}.csv"
+    multi_file:
+      mode: all
+      order_by: arrival_time
+      on_earlier_failure: continue
+
+parser:
+  type: csv
+  has_header: true
+
+control_gates:
+  file_size:
+    min_bytes: 20
+    max_bytes: 10000000
+  row_count:
+    min_rows: 1
+    max_rows: 100000
+  on_fail: quarantine_file
+
+raw:
+  schema: data_in
+  table: portfolio_holdings_raw
+  ddl_mode: create_if_not_exists
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true
+
+quality:
+  integrity_mode: row_level
+  rules:
+    - column: portfolio
+      checks: [not_null, non_empty]
+    - column: security
+      checks: [not_null, non_empty]
+    - column: date
+      checks: [not_null, valid_date]
+      cast_to: date
+      format: "%Y%d%m"
+    - column: shares
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 4
+    - column: price
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 4
+    - column: currency
+      checks: [not_null, non_empty]
+    - column: fx
+      checks: [not_null, is_numeric, greater_than_or_equal: 0]
+      cast_to: decimal
+      precision: 10
+      scale: 6
+  quarantine:
+    location: "./scratch_portfolio_demo/quarantine/"
+    kind: local
+    alert:
+      channel: log
+      destination: "n/a"
+
+stage:
+  schema: data_in
+  table: portfolio_holdings_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["portfolio", "security", "date"]
+  write_mode: upsert
+
+gold:
+  schema: core
+  dbt_project: "dbt/"
+  dbt_select: "portfolio_holdings_gold"
+
+resilience:
+  retry:
+    max_attempts: 3
+    backoff: exponential
+    base_delay_seconds: 1
+    jitter: true
+
+lineage:
+  namespace: "datamesh-prod"
+  job_name: portfolio_holdings_ingest
