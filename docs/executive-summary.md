@@ -2,9 +2,12 @@
 
 **A config-driven medallion (bronze/silver/gold) data pipeline framework.** A
 new data source becomes a YAML spec file plus, optionally, a SQL
-transformation — never new Python code. Four production-shaped pipelines
-(`holdings_ingest`, `asset_ingest`, `price_ingest`, `benchmark_ingest`) have
-been built and run end-to-end against real data as proof of the pattern.
+transformation — never new Python code. Six production-shaped pipelines
+(`holdings_ingest`, `asset_ingest`, `price_ingest`, `benchmark_ingest`,
+`portfolio_holdings_ingest`, `fx_rates_ingest`) have been built and run
+end-to-end against real data as proof of the pattern. Data quality runs on
+**Great Expectations**, lineage lands in **OpenMetadata**, and orchestration
+(including drop-a-file-and-it-runs) is handled by **Dagster**.
 
 ---
 
@@ -34,7 +37,11 @@ pipeline it's running; it branches on what the spec says. This means:
 |---|---|---|
 | **File formats** | CSV, delimited (custom separator/quote/escape), fixed-width, JSON, XML | One engine handles the realistic spread of source formats a data/finance shop actually receives, without a parser rewrite per feed. |
 | **Fixed-width chunked parsing** | Automatic for files over 5MB, parallelized across CPU cores | Large historical/mainframe-style extracts parse fast without changing how the pipeline is configured — chunking is transparent to the spec author. |
-| **Source location** | Local filesystem or S3 | Same spec shape works for a laptop/dev box and a cloud deployment. |
+| **Source location** | Local filesystem or S3 (`sftp` is accepted by the schema but discovery is not yet implemented) | Same spec shape works for a laptop/dev box and a cloud deployment. |
+| **Multi-file selection** | `source.location.multi_file`: `file_pattern`, order by filename timestamp / modified time, `mode` (latest / all), `on_earlier_failure` | Several dated files can sit in one location; the engine picks and orders them deterministically instead of relying on a hand-named file. |
+| **File-drop watching** | `source.location.watch` — a Dagster sensor per pipeline (default 60s poll, RUNNING by default), one run per new file, oldest first | Drop a file in the folder and it is processed within seconds, no manual trigger. Files not matching the pattern are logged as warnings, not silently ignored. |
+| **Missed-arrival alert** | `watch.expected_by` + `expected_timezone` + `missed_arrival_alert` (log or webhook) | If no file dated today has arrived by the deadline, ops is alerted once per day; the alert resets when a file lands. |
+| **Archive on success** | `source.location.archive` (`path`, `date_subdirs`) for local and S3 | Fully-processed files move to a rolling `YYYYMMDD` archive folder — only when the run succeeded through its final layer; never overwrites; duplicate-checksum files are left alone. |
 | **Control gates** | Min/max file size, min/max row count | Catches a truncated transfer, a duplicate/corrupted feed, or a wildly wrong row count *before* anything lands in a table — the file is quarantined whole, cleanly, with an alert. |
 
 ---
@@ -43,6 +50,7 @@ pipeline it's running; it branches on what the spec says. This means:
 
 | Capability | Options | Benefit |
 |---|---|---|
+| **Engine** | Great Expectations (replaced pandera); each run's results are published as browsable **GX Data Docs** | Industry-standard DQ tooling with a human-readable report per validation, not just a log line. |
 | **Field-level checks** | `not_null`, `non_empty`, `valid_date` (+format), `is_numeric`, plus parameterized comparisons (`greater_than`, `less_than_or_equal`, etc.) | Covers the checks that actually catch real bad data (nulls, malformed dates, out-of-range values) without needing custom code per rule. |
 | **Reference-data lookups** | Arbitrary SQL query per field (e.g. validate a currency code against `ref.currencies`) | Validates against live reference data, not a hardcoded list that goes stale. |
 | **Type casting** | `date` (with format string), `decimal` (with precision/scale) | Raw text is only cast to a real type *after* it's proven valid — a bad value can never silently become `NULL` in a typed column. |
@@ -96,8 +104,9 @@ pipeline it's running; it branches on what the spec says. This means:
 |---|---|---|
 | **Process monitor** | One shared audit table (`control.process_monitor`) across every pipeline, every step | A single place to answer "did today's run happen, and what did it do" for *any* pipeline — no per-pipeline logging convention to maintain. |
 | **Retry policy** | `exponential` or `fixed` backoff, configurable attempts/delay/jitter, only on transient connection errors | Transient network/DB blips self-heal without manual intervention; a genuine data or logic error still fails fast instead of retrying uselessly. |
-| **OpenLineage emission** | START/COMPLETE/FAIL events per step, pluggable transport | Plugs into any OpenLineage-compatible catalog (Marquez, DataHub, etc.) with zero pipeline-specific code. |
-| **Column-level lineage** | `dais lineage --spec <pipeline>` — combines spec introspection (raw→stage) with real SQL parsing of the compiled dbt model (stage→gold) | Answers "where did this gold column's value actually come from" down to the SQL expression — genuinely traced, not just documented by hand. |
+| **OpenLineage emission** | START/COMPLETE/FAIL events per step, pluggable transport, with standard `schema` and `columnLineage` dataset facets | Plugs into any OpenLineage-compatible catalog. DAIS ships a forwarder that turns these events into OpenMetadata tables, columns and lineage edges. |
+| **Column-level lineage (automatic)** | Emitted with every run: raw→stage from the spec, stage→gold from dbt (`dbt-ol`) | Column-level lineage appears in OpenMetadata after a normal run — no extra command. `dais lineage --sync-openmetadata` remains as a fallback and to populate gold-build columns. Columns known only from dbt may show type `UNKNOWN`. |
+| **Data catalog** | OpenMetadata (replaced Marquez), including glossary terms/tags on columns | Business glossary, ownership and lineage in one catalog UI. |
 | **Business process / SLA tracking** | Group pipelines into a named process with a deadline (`business_processes/*.yaml`); query pending/met/breached state | Answers "is morning reconciliation done yet" as one API call, across multiple underlying pipelines, without a separate SLA-tracking tool. |
 
 ---
@@ -118,6 +127,7 @@ pipeline it's running; it branches on what the spec says. This means:
 | **CLI** (`dais run`) | Direct, scriptable execution — exit code 0/1, safe to call from any shell-based scheduler. |
 | **HTTP API** (FastAPI) | `POST /pipelines/{name}/run` + `GET .../status`, checksum-deduped so a retry-after-timeout never double-processes a file. Orchestrator-agnostic by design. |
 | **Quarantine review UI** | Same API server, a browser page for data ops (Section 4). |
+| **Dagster** | Per-pipeline asset/job, gold models as dbt assets that auto-materialize after their stage asset, file-watch sensors. Open-source Dagster has no built-in login/RBAC — put it behind a proxy or use Dagster+ (decision needed for production). |
 | **Airflow DAG** (ready to drop in) | Triggers all four pipelines via the HTTP API on a schedule — DAIS needs zero Airflow-specific code, since the API was already orchestrator-agnostic. |
 | **Control-M-style wrapper** | A documented shell-script pattern for enterprise batch schedulers already in use at most financial institutions. |
 
@@ -128,12 +138,12 @@ pipeline it's running; it branches on what the spec says. This means:
 Every capability above has been exercised against real data in this
 environment, not only unit-tested in isolation:
 
-- **189 automated tests**, the large majority running against a **real
+- **368 automated tests**, the large majority running against a **real
   Postgres instance** (not mocks) — connectors, DQ engine, medallion
   landing, monitoring, and API integration are all verified against actual
   database behavior, which has already caught real bugs a mock would have
   hidden (a transaction-poisoning bug, a monitoring-table isolation leak).
-- **Four pipelines run end-to-end**, including a 35,000-row real price
+- **Six pipelines run end-to-end**, including an FX-rates pipeline whose raw→stage load and separate gold build are orchestrated by Dagster off a file drop, and including a 35,000-row real price
   history file processed in ~6 seconds.
 - **Quarantine → review → resubmit → gold refresh** exercised as a full
   live loop, not just described.
@@ -148,6 +158,10 @@ environment, not only unit-tested in isolation:
   dedicated task queue (Redis/arq) — fine at current scale; the interface
   is already factored so swapping in a real queue later doesn't touch the
   API routes.
+- **The API's run registry is in-memory** (single replica, lost on restart);
+  pipeline runs execute inside the API process.
+- **SFTP watching** is accepted by the schema but not implemented.
+- **GX Data Docs are served unauthenticated.**
 - **Snowflake and email alerting** are accepted by the config schema for
   forward-compatibility but not yet implemented — building either is an
   incremental addition, not a redesign.

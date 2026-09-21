@@ -25,7 +25,9 @@ convention (all three set on the DAIS API server and Dagster processes
 themselves at startup — see `.claude/skills/dais-local-stack/SKILL.md`),
 and a real file that currently exists under `data/`. Missing
 `OPENLINEAGE_URL` specifically causes no visible error at all — the run
-just succeeds without ever showing up in Marquez.
+just succeeds without ever showing up in OpenMetadata (lineage flows
+pipeline → OpenLineage → the DAIS forwarder → OpenMetadata; column-level
+lineage is emitted automatically with each run).
 
 ### A note on shells
 
@@ -60,7 +62,7 @@ which of two unrelated mechanisms it uses:
   needed.
 - **Separate `gold_builds/*.yaml`** (`regional_sales_gold` depends on
   `sales_ingest`; `portfolio_summary_gold` depends on `holdings_ingest` +
-  `asset_ingest`): these are dbt builds, not `PipelineSpec`s. **There is
+  `asset_ingest`; `fx_rates_gold` depends on `fx_rates_ingest`): these are dbt builds, not `PipelineSpec`s. **There is
   no HTTP API endpoint for them at all** — `POST /pipelines/{name}/run`
   only ever loads a `PipelineSpec` (`load_spec`), never a `GoldBuildSpec`.
   A gold build is runnable only via its own Dagster job, or a direct
@@ -225,6 +227,31 @@ ops:
 
 ---
 
+## portfolio_holdings_ingest
+
+Demo pipeline with a file-watch sensor (see "Drop a file and let Dagster
+pick it up" at the bottom). Run manually the same way as any other:
+`Invoke-DaisRun portfolio_holdings_ingest "<path to file>"`; Dagster job
+`portfolio_holdings_ingest_job`, op `portfolio_holdings_ingest__stage`.
+
+---
+
+## fx_rates_ingest (+ fx_rates_gold)
+
+Stops at `stage`; the gold table is a **separate** build (`fx_rates_gold`,
+dbt) that Dagster launches automatically once the stage asset materializes.
+File name `FX_RATES_<YYYYMMDDHHMM>.csv`, header
+`fxDate,fromCCY,toCCY,fxRate,sourceType` (case-sensitive). Currencies are
+validated against `core.t_ref_currency` (create/seed with
+`dais seed-currencies --spec specs/fx_rates_ingest.yaml`). On success the
+file moves to `data/fx_rates/archive/<YYYYMMDD>/`. Full walkthrough:
+[fx-rates-pipeline.md](fx-rates-pipeline.md).
+
+**Dagster** — job `fx_rates_ingest_job`, op `fx_rates_ingest__stage`;
+gold job `fx_rates_gold_job` (no config).
+
+---
+
 ## sales_ingest
 
 Stops at `stage` — its gold lives separately in `gold_builds/regional_sales_gold.yaml`.
@@ -330,8 +357,36 @@ forget:
 
 1. `dagster dev` must actually be running (its bundled daemon evaluates
    the condition — a webserver-only setup does nothing).
-2. The automation condition sensor is **off by default**: Dagster UI →
-   **Overview → Automation** → toggle `default_automation_condition_sensor`
-   on, once per code location.
+2. The automation condition sensor must be **on**. Dagster sensors default
+   to stopped: Dagster UI → **Overview → Automation** → toggle
+   `default_automation_condition_sensor` on, once per code location (it
+   stays on across restarts, since state lives in `.dagster_home`).
 
 Without both, `eager()` is declared in code but nothing ever acts on it.
+
+---
+
+## Drop a file and let Dagster pick it up (watch sensors)
+
+Pipelines whose spec has `source.location.watch` get a Dagster sensor
+`<pipeline>_watch_sensor` (currently `portfolio_holdings_ingest`,
+`fx_rates_ingest`). Unlike ordinary sensors these default to **RUNNING**.
+
+- Every poll (`poll_interval_seconds`, default 60) it lists the location
+  using `multi_file`'s pattern and ordering, and requests one run per file,
+  **oldest first**; Dagster dedupes on `run_key = pipeline:path:sort_key`.
+- Files that don't match `file_pattern` produce a warning in the sensor
+  log rather than being silently skipped.
+- Set a per-sensor concurrency limit of 1 if strict oldest-first ordering
+  matters (runs otherwise may overlap).
+- `expected_by` / `expected_timezone` / `missed_arrival_alert`: if no file
+  dated today has arrived by the deadline, one alert (log or webhook) is
+  sent per day.
+- `source.location.archive` moves each successfully processed file (only
+  when the run reached its final layer) into `<archive>/<YYYYMMDD>/`.
+- Duplicate content (same checksum) is not reloaded and not archived.
+- The run registry lives in the API process's memory, so restarting the API
+  forgets prior checksums.
+- A sensor-launched run needs the DAIS API up (Dagster calls it), and both
+  must be restarted after spec-model changes. See
+  [testing-the-file-watcher.md](testing-the-file-watcher.md).

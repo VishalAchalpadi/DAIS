@@ -125,7 +125,8 @@ flowchart TB
 ## Fig. 4 — One dataset, not two: matching identities end to end
 
 Emitting real OpenLineage events on both sides of the raw/stage → gold
-boundary isn't enough by itself. A backend like Marquez connects a graph
+boundary isn't enough by itself. A backend like OpenMetadata (fed by the
+DAIS OpenLineage→OpenMetadata forwarder; it replaced Marquez) connects a graph
 by matching **(namespace, name)** dataset identity, not job identity - and
 `lineage/emitter.py` and `dbt-ol` used to name the *same physical stage
 table* two different ways:
@@ -158,6 +159,33 @@ and a real `regional_sales_gold` dbt-ol run now emit the *identical*
 dataset identity - `postgres://localhost:5432` /
 `GEODS.data_in.sales_stage` - for both the top-level input/output entries
 and the nested column-lineage facet.
+
+---
+
+## Fig. 5 — Automatic column-level lineage, and file-drop triggers
+
+**Column lineage.** Each DAIS step now attaches the standard OpenLineage
+`schema` and `columnLineage` facets to its output dataset (raw columns from
+the parsed file; raw→stage column mappings derived from the spec), and
+`dbt-ol` emits the stage→gold column facets itself. The forwarder turns
+these into OpenMetadata table columns and column-level lineage edges — no
+`dais lineage --sync-openmetadata` needed (that command remains as a
+fallback and for gold-build column population). Forwarder rules learned the
+hard way: existing tables are looked up (GET) before creation, because
+re-PUTting a table makes OpenMetadata prune its column lineage; columns are
+only appended, never replaced (so glossary tags survive); dbt-only columns
+may show type `UNKNOWN`.
+
+**Watch sensors.** A third trigger source sits beside Control-M and manual
+Dagster runs: a per-pipeline Dagster sensor (`<pipeline>_watch_sensor`,
+defined by `source.location.watch`) that polls the pipeline's location and
+issues one `<pipeline>_job` run per new file, oldest first. It still goes
+through the same API and `run_pipeline()`, so the "one execution path"
+rule in Fig. 1 holds. After a fully successful run the file can be moved
+to a dated archive folder (`source.location.archive`), and
+`watch.expected_by` raises a once-a-day missed-arrival alert. Gold builds
+for such pipelines (e.g. `fx_rates_gold`) fire from the stage asset via
+`AutomationCondition.eager()`.
 
 ---
 
