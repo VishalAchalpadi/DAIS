@@ -15,7 +15,9 @@ from dais.ai.profiler import compute_profile
 from dais.execution import layers_to_run
 from dais.lineage.emitter import LineageEmitter, build_emitter
 from dais.medallion.bronze import land_raw
+from dais.medallion.bronze import _raw_table_columns
 from dais.medallion.gold import run_gold
+from dais.medallion.silver import _stage_table_columns
 from dais.medallion.silver import land_stage
 from dais.monitoring.process_monitor import ProcessMonitor
 from dais.parsers import get_parser
@@ -49,6 +51,16 @@ class PipelineRunResult:
     quarantine_location: str | None = None
     error: str | None = None
     failure_reasons: list[str] = field(default_factory=list)
+
+
+def _raw_to_stage_column_lineage(spec: PipelineSpec, raw_target: str) -> list[tuple[str, str, str, str | None]]:
+    """(stage column, raw table, raw column, transformation) for every column
+    the spec's quality rules / business key carry from raw to stage - the
+    same mapping `dais lineage` prints, sent as a standard OpenLineage
+    columnLineage facet so it reaches the lineage backend on every run."""
+    from dais.lineage.column_lineage import raw_to_stage_edges
+
+    return [(e.target.column, raw_target, e.source.column, e.transformation) for e in raw_to_stage_edges(spec)]
 
 
 def _read_source_bytes(file_path: str, s3: S3Connector | None) -> bytes:
@@ -117,7 +129,12 @@ def run_pipeline(
         parsed_df, spec, connector, file_name=file_name, file_path=file_path, file_bytes=raw_bytes, batch_id=run_id
     )
     monitor.complete_step(handle, row_count_in=parsed_df.height, row_count_out=raw_result.row_count_out)
-    emitter.complete("raw", run_id, outputs=[raw_target])
+    emitter.complete(
+        "raw",
+        run_id,
+        outputs=[raw_target],
+        schemas={raw_target: [(c.name, c.sql_type) for c in _raw_table_columns(parsed_df, spec.raw.preserve_metadata)]},
+    )
 
     if "stage" not in layers:
         return PipelineRunResult(
@@ -161,7 +178,13 @@ def run_pipeline(
 
     stage_result = land_stage(outcome.promoted_df, spec, connector)
     monitor.complete_step(handle, row_count_in=parsed_df.height, row_count_out=stage_result.row_count_out)
-    emitter.complete("stage", run_id, outputs=[stage_target])
+    emitter.complete(
+        "stage",
+        run_id,
+        outputs=[stage_target],
+        schemas={stage_target: [(c.name, c.sql_type) for c in _stage_table_columns(outcome.promoted_df)]},
+        column_lineage={stage_target: _raw_to_stage_column_lineage(spec, raw_target)},
+    )
 
     # --- anomaly detection (Phase 8b, additive/optional) - a no-op for
     # any pipeline that doesn't declare anomaly_detection in its spec ---

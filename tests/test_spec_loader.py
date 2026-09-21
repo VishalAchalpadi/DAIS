@@ -419,3 +419,58 @@ def test_multi_file_pattern_rejects_more_than_one_token():
 def test_multi_file_absent_by_default():
     spec = load_spec(REFERENCE_SPEC)
     assert spec.source.location.multi_file is None
+
+
+# ---------------------------------------------------------------------------
+# source.location.watch
+# ---------------------------------------------------------------------------
+
+def _with_multi_file(data):
+    data["source"]["location"]["multi_file"] = {"mode": "all"}
+    return data
+
+
+def test_watch_valid_shape_accepted():
+    data = _with_multi_file(_load_dict(VALID_SPEC))
+    data["source"]["location"]["watch"] = {
+        "poll_interval_seconds": 30,
+        "expected_by": "09:00",
+        "expected_timezone": "America/New_York",
+        "missed_arrival_alert": {"channel": "webhook", "destination": "http://alerts.test/hook"},
+    }
+    spec = PipelineSpec.model_validate(data)
+    assert spec.source.location.watch.expected_by == "09:00"
+    assert spec.source.location.watch.enabled is True
+
+
+def test_watch_requires_multi_file():
+    data = _load_dict(VALID_SPEC)
+    data["source"]["location"]["watch"] = {}
+    with pytest.raises(ValidationError, match="watch requires multi_file"):
+        PipelineSpec.model_validate(data)
+
+
+def test_watch_expected_by_requires_missed_arrival_alert():
+    data = _with_multi_file(_load_dict(VALID_SPEC))
+    data["source"]["location"]["watch"] = {"expected_by": "09:00"}
+    with pytest.raises(ValidationError, match="missed_arrival_alert is required"):
+        PipelineSpec.model_validate(data)
+
+
+def test_sftp_is_an_accepted_location_kind():
+    data = _load_dict(VALID_SPEC)
+    data["source"]["location"]["kind"] = "sftp"
+    assert PipelineSpec.model_validate(data).source.location.kind == "sftp"
+
+
+def test_archive_block_accepted_and_defaults_to_dated_subdirs():
+    data = _load_dict(VALID_SPEC)
+    data["source"]["location"]["archive"] = {"path": "s3://acme-data/holdings/archive/"}
+    assert PipelineSpec.model_validate(data).source.location.archive.date_subdirs is True
+
+
+def test_archive_path_must_match_location_kind():
+    data = _load_dict(VALID_SPEC)  # location.kind is s3
+    data["source"]["location"]["archive"] = {"path": "./local/archive/"}
+    with pytest.raises(ValidationError, match="must be an s3://"):
+        PipelineSpec.model_validate(data)

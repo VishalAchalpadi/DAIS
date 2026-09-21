@@ -184,3 +184,26 @@ def sync_column_lineage(spec: PipelineSpec, connection_params: dict) -> None:
                 connection_params, spec.lineage.namespace, spec.lineage.job_name, "gold",
                 stage_table, gold_table, stage_to_gold,
             )
+
+
+def sync_dependent_gold_build_columns(
+    spec: PipelineSpec, connection_params: dict, gold_builds_dir: str = "gold_builds"
+) -> list[str]:
+    """Populates the columns of the target table of every gold build
+    (gold_builds/*.yaml) that lists this pipeline in depends_on. Such a
+    build is a separate pipeline from spec, so sync_column_lineage() above
+    (which only follows the spec's own inline gold:) never touches its
+    table. Column-LEVEL lineage into these tables is not computed here - only
+    the table's columns, so they appear in OpenMetadata and can be tagged.
+    Returns the "schema.table" names it looked at."""
+    from pathlib import Path
+
+    from dais.spec.loader import load_gold_build_spec
+
+    synced = []
+    for path in sorted(Path(gold_builds_dir).glob("*.yaml")):
+        gold = load_gold_build_spec(path)
+        if spec.pipeline_name in gold.depends_on:
+            _ensure_columns(connection_params, gold.target.schema_, gold.target.primary_table)
+            synced.append(f"{gold.target.schema_}.{gold.target.primary_table}")
+    return synced

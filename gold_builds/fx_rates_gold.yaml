@@ -1,0 +1,33 @@
+# =========================================================================
+# Gold Build Spec: fx_rates_gold
+#
+# Derives the latest rate, prior rate, day-over-day change and inverse rate
+# for every currency pair from fx_rates_ingest's stage table. A SEPARATE
+# pipeline from fx_rates_ingest (which stops at stage): Dagster runs this
+# automatically after fx_rates_ingest's stage asset updates (eager
+# automation - needs the automation-condition sensor turned on once per
+# code location).
+# =========================================================================
+
+gold_build_name: fx_rates_gold
+description: "Latest FX rate, prior rate, day-over-day change and inverse rate per currency pair"
+owner: "treasury-data-team"
+
+depends_on:
+  - fx_rates_ingest
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+dbt:
+  project_dir: "dbt/"
+  select: "tag:fx_rates_gold"
+
+target:
+  schema: core
+  primary_table: fx_rates_gold
+
+lineage:
+  namespace: "datamesh-prod"
+  job_name: "gold-build-fx_rates_gold"

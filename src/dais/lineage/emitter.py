@@ -8,6 +8,7 @@ import os
 from datetime import datetime, timezone
 
 from openlineage.client import OpenLineageClient
+from openlineage.client.facet_v2 import column_lineage_dataset, schema_dataset
 from openlineage.client.run import Dataset, Job, Run, RunEvent, RunState
 from openlineage.client.transport.console import ConsoleConfig, ConsoleTransport
 from openlineage.client.transport.transport import Transport
@@ -43,7 +44,7 @@ class LineageEmitter:
         self.db_namespace = db_namespace
         self.dbname = dbname
 
-    def _dataset(self, identifier: str) -> Dataset:
+    def _dataset(self, identifier: str, facets: dict | None = None) -> Dataset:
         is_table = (
             self.db_namespace is not None
             and self.dbname is not None
@@ -53,11 +54,48 @@ class LineageEmitter:
         )
         if is_table:
             schema, table = identifier.split(".", 1)
-            return Dataset(namespace=self.db_namespace, name=f"{self.dbname}.{schema}.{table}")
+            return Dataset(namespace=self.db_namespace, name=f"{self.dbname}.{schema}.{table}", facets=facets or {})
         # A source file (or anything else not shaped "schema.table") has
         # no external system's dataset identity to match - keep it under
         # this job's own logical namespace, same as always.
-        return Dataset(namespace=self.namespace, name=identifier)
+        return Dataset(namespace=self.namespace, name=identifier, facets=facets or {})
+
+    def _facets(
+        self,
+        identifier: str,
+        schemas: dict[str, list[tuple[str, str]]] | None,
+        column_lineage: dict[str, list[tuple[str, str, str, str | None]]] | None,
+    ) -> dict:
+        """Standard OpenLineage `schema` / `columnLineage` dataset facets for
+        one output dataset - what lets a backend (openmetadata_forwarder.py)
+        show columns and column-level lineage without any DB access or extra
+        step. schemas: dataset -> [(column, type)]. column_lineage: output
+        dataset -> [(output column, input dataset, input column, description)]."""
+        facets: dict = {}
+        if schemas and identifier in schemas:
+            facets["schema"] = schema_dataset.SchemaDatasetFacet(
+                fields=[schema_dataset.SchemaDatasetFacetFields(name=n, type=t) for n, t in schemas[identifier]]
+            )
+        if column_lineage and identifier in column_lineage:
+            by_output: dict[str, list[column_lineage_dataset.InputField]] = {}
+            descriptions: dict[str, str | None] = {}
+            for out_col, in_identifier, in_col, description in column_lineage[identifier]:
+                source = self._dataset(in_identifier)
+                by_output.setdefault(out_col, []).append(
+                    column_lineage_dataset.InputField(namespace=source.namespace, name=source.name, field=in_col)
+                )
+                descriptions.setdefault(out_col, description)
+            facets["columnLineage"] = column_lineage_dataset.ColumnLineageDatasetFacet(
+                fields={
+                    out_col: column_lineage_dataset.Fields(
+                        inputFields=inputs,
+                        transformationDescription=descriptions.get(out_col),
+                        transformationType="TRANSFORMATION",
+                    )
+                    for out_col, inputs in by_output.items()
+                }
+            )
+        return facets
 
     def _event(
         self,
@@ -66,6 +104,8 @@ class LineageEmitter:
         run_id: str,
         inputs: list[str] | None,
         outputs: list[str] | None,
+        schemas: dict[str, list[tuple[str, str]]] | None = None,
+        column_lineage: dict[str, list[tuple[str, str, str, str | None]]] | None = None,
     ) -> RunEvent:
         return RunEvent(
             eventType=state,
@@ -74,14 +114,23 @@ class LineageEmitter:
             job=Job(namespace=self.namespace, name=f"{self.job_name}.{step}"),
             producer=_PRODUCER,
             inputs=[self._dataset(n) for n in (inputs or [])],
-            outputs=[self._dataset(n) for n in (outputs or [])],
+            outputs=[self._dataset(n, self._facets(n, schemas, column_lineage)) for n in (outputs or [])],
         )
 
     def start(self, step: str, run_id: str, inputs: list[str] | None = None, outputs: list[str] | None = None) -> None:
         self.client.emit(self._event(RunState.START, step, run_id, inputs, outputs))
 
-    def complete(self, step: str, run_id: str, inputs: list[str] | None = None, outputs: list[str] | None = None) -> None:
-        self.client.emit(self._event(RunState.COMPLETE, step, run_id, inputs, outputs))
+    def complete(
+        self,
+        step: str,
+        run_id: str,
+        inputs: list[str] | None = None,
+        outputs: list[str] | None = None,
+        *,
+        schemas: dict[str, list[tuple[str, str]]] | None = None,
+        column_lineage: dict[str, list[tuple[str, str, str, str | None]]] | None = None,
+    ) -> None:
+        self.client.emit(self._event(RunState.COMPLETE, step, run_id, inputs, outputs, schemas, column_lineage))
 
     def fail(self, step: str, run_id: str, inputs: list[str] | None = None, outputs: list[str] | None = None) -> None:
         self.client.emit(self._event(RunState.FAIL, step, run_id, inputs, outputs))

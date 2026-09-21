@@ -10,6 +10,7 @@ import json
 import sys
 
 from dais.db import build_connector_for_spec, build_s3_connector_for_spec
+from dais.ingestion.archiver import archive_source_file, should_archive
 from dais.ingestion.file_discovery import FileDiscoveryError, resolve_files
 from dais.lineage.column_lineage import build_lineage_graph
 from dais.pipeline import run_pipeline
@@ -76,6 +77,8 @@ def _run(args: argparse.Namespace) -> int:
                 print(f"error: {result.error}", file=sys.stderr)
             if result.status != "succeeded":
                 exit_code = 1
+            elif should_archive(spec, result.status, result.layer_reached, args.stop_after):
+                print(f"archived to {archive_source_file(spec, file_path, s3)}")
             if (
                 result.status == "failed"
                 and len(file_paths) > 1
@@ -89,6 +92,23 @@ def _run(args: argparse.Namespace) -> int:
         return exit_code
     finally:
         connector.close()
+
+
+def _seed_currencies(args: argparse.Namespace) -> int:
+    from dais.reference.currencies import SCHEMA, TABLE, ensure_currency_reference
+
+    try:
+        spec = load_spec(args.spec)
+    except SpecLoadError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    connector, _ = build_connector_for_spec(spec)
+    try:
+        added = ensure_currency_reference(connector)
+    finally:
+        connector.close()
+    print(f"{SCHEMA}.{TABLE}: {len(added)} currency code(s) added" + (f" ({', '.join(added)})" if added else " - already up to date"))
+    return 0
 
 
 def _lineage(args: argparse.Namespace) -> int:
@@ -121,8 +141,13 @@ def _lineage(args: argparse.Namespace) -> int:
     if args.sync_openmetadata:
         from dais.lineage.openmetadata_column_sync import sync_column_lineage
 
+        from dais.lineage.openmetadata_column_sync import sync_dependent_gold_build_columns
+
         sync_column_lineage(spec, connection_params)
+        gold_tables = sync_dependent_gold_build_columns(spec, connection_params)
         print(f"synced {len(payload)} column-lineage edges to OpenMetadata", file=sys.stderr)
+        if gold_tables:
+            print(f"populated columns for gold build table(s): {', '.join(gold_tables)}", file=sys.stderr)
 
     return 0
 
@@ -162,12 +187,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    seed_parser = subparsers.add_parser(
+        "seed-currencies",
+        help="create core.t_ref_currency if missing and add any missing ISO currency codes (idempotent)",
+    )
+    seed_parser.add_argument("--spec", required=True, help="any pipeline spec - used only for its database connection")
+
     args = parser.parse_args(argv)
 
     if args.command == "run":
         return _run(args)
     if args.command == "lineage":
         return _lineage(args)
+    if args.command == "seed-currencies":
+        return _seed_currencies(args)
     raise AssertionError(f"unhandled command: {args.command}")
 
 

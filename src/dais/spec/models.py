@@ -59,6 +59,54 @@ class MonitoringConfig(StrictModel):
 # source
 # ---------------------------------------------------------------------------
 
+class AlertConfig(StrictModel):
+    channel: Literal["log", "webhook", "email"]
+    destination: str
+
+    _v_destination = field_validator("destination")(_reject_placeholder)
+
+
+class WatchConfig(StrictModel):
+    """Configures event-driven watching of `SourceLocation.path` (a Dagster
+    sensor - see orchestration/dagster/watch_sensors.py) instead of only
+    reacting to an explicit/on-demand trigger: any new file matching
+    file_pattern kicks off a run automatically, polled every
+    poll_interval_seconds. Requires `multi_file` to also be set (its
+    order_by/filename_timestamp_format identify each candidate file's
+    effective date - mode/order/on_earlier_failure are meaningless here,
+    since a sensor dispatches every new file every time, not a policy pick)."""
+
+    enabled: bool = True
+    poll_interval_seconds: int = 60
+    # "HH:MM", mirrors business_process's sla.complete_by shape - if no
+    # file matching file_pattern has arrived by this time (in
+    # expected_timezone), missed_arrival_alert fires once for that day.
+    expected_by: str | None = None
+    expected_timezone: str = "UTC"
+    missed_arrival_alert: AlertConfig | None = None
+
+    @model_validator(mode="after")
+    def _alert_required_with_deadline(self) -> "WatchConfig":
+        if self.expected_by and not self.missed_arrival_alert:
+            raise ValueError("missed_arrival_alert is required when expected_by is set")
+        return self
+
+
+class ArchiveConfig(StrictModel):
+    """Moves a source file out of the landing location once its run has
+    SUCCEEDED (reached the pipeline's stop layer) - so a processed file
+    doesn't sit in the drop directory forever. Quarantined/failed files
+    are deliberately left in place for review. Presence of this block is the
+    opt-in; absent, files are never moved (the default, as before)."""
+
+    path: str
+    # Roll processed files into a per-day directory (<path>/YYYYMMDD/<file>,
+    # UTC date of archiving) instead of one flat pile.
+    date_subdirs: bool = True
+
+    _v_path = field_validator("path")(_reject_placeholder)
+
+
 class MultiFileSelection(StrictModel):
     """Configures how a pipeline trigger picks which file(s) to process
     when `SourceLocation.file_pattern` matches more than one file in
@@ -93,12 +141,33 @@ class MultiFileSelection(StrictModel):
 
 
 class SourceLocation(StrictModel):
-    kind: Literal["s3", "local"]
+    kind: Literal["s3", "local", "sftp"]  # sftp: discovery/watching not yet implemented (see file_discovery.py)
     path: str
     file_pattern: str | None = None
     multi_file: MultiFileSelection | None = None
+    watch: WatchConfig | None = None
+    archive: ArchiveConfig | None = None
 
     _v_path = field_validator("path")(_reject_placeholder)
+
+    @model_validator(mode="after")
+    def _archive_matches_kind(self) -> "SourceLocation":
+        if self.archive is None:
+            return self
+        if self.kind == "sftp":
+            raise ValueError("archive is not supported for sftp locations yet")
+        is_s3_path = self.archive.path.startswith("s3://")
+        if self.kind == "s3" and not is_s3_path:
+            raise ValueError(f"archive.path must be an s3:// URI when kind is 's3', got {self.archive.path!r}")
+        if self.kind == "local" and is_s3_path:
+            raise ValueError("archive.path must be a local path when kind is 'local', not an s3:// URI")
+        return self
+
+    @model_validator(mode="after")
+    def _watch_requires_multi_file(self) -> "SourceLocation":
+        if self.watch is not None and self.multi_file is None:
+            raise ValueError("watch requires multi_file to be set (for file_pattern ordering/identity)")
+        return self
 
     @model_validator(mode="after")
     def _multi_file_requires_pattern(self) -> "SourceLocation":
@@ -310,13 +379,6 @@ class QualityRule(StrictModel):
         if "valid_date" in self.checks and not self.format:
             raise ValueError(f"column {self.column!r}: `format` is required when `valid_date` is used")
         return self
-
-
-class AlertConfig(StrictModel):
-    channel: Literal["log", "webhook", "email"]
-    destination: str
-
-    _v_destination = field_validator("destination")(_reject_placeholder)
 
 
 class QuarantineConfig(StrictModel):

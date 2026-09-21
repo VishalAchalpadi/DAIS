@@ -21,6 +21,8 @@ from dais.orchestration.dagster.api_resource import DaisApiResource
 from dais.orchestration.dagster.dbt_project import DBT_PROJECT, DBT_PROJECT_DIR, REAL_DBT_EXECUTABLE
 from dais.orchestration.dagster.gold_assets import build_gold_build_dbt_assets
 from dais.orchestration.dagster.ingest_assets import build_ingest_asset
+from dais.orchestration.dagster.watch_sensors import build_watch_sensor
+from dais.spec.loader import load_spec
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 GOLD_BUILDS_DIR = REPO_ROOT / "gold_builds"
@@ -87,6 +89,18 @@ ingest_jobs = [
     for pipeline_name, asset_def in zip(all_pipeline_names, ingest_assets_definitions)
 ]
 
+# A file-watching sensor per pipeline whose spec opts in via
+# source.location.watch (watch_sensors.py) - targets that pipeline's own
+# ingest job above, so a sensor-launched run is identical to a manual one.
+watch_sensors = []
+for pipeline_name, ingest_job in zip(all_pipeline_names, ingest_jobs):
+    spec_path = SPECS_DIR / f"{pipeline_name}.yaml"
+    if not spec_path.exists():
+        continue
+    pipeline_spec = load_spec(spec_path)
+    if pipeline_spec.source.location.watch is not None and pipeline_spec.source.location.watch.enabled:
+        watch_sensors.append(build_watch_sensor(pipeline_name, pipeline_spec, ingest_job))
+
 all_assets = [*ingest_assets_definitions, *gold_assets_definitions]
 
 dais_medallion_job = define_asset_job(
@@ -102,6 +116,7 @@ dais_medallion_job = define_asset_job(
 defs = Definitions(
     assets=all_assets,
     jobs=[dais_medallion_job, *gold_build_jobs, *ingest_jobs],
+    sensors=watch_sensors,
     resources={
         "dais_api": DaisApiResource(
             base_url=os.environ.get("DAIS_API_BASE_URL", "http://localhost:8000"),

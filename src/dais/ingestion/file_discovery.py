@@ -10,6 +10,7 @@ polling).
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ from pathlib import Path
 
 from dais.resilience.connectors.s3_connector import S3Connector, parse_s3_uri
 from dais.spec.models import MultiFileSelection, SourceLocation
+
+log = logging.getLogger(__name__)
 
 _PATTERN_TOKEN_RE = re.compile(r"\{(\w+)\}")
 
@@ -27,6 +30,17 @@ class FileDiscoveryError(Exception):
     filename_timestamp_format. Callers (the API layer) turn this into a
     4xx, not a 500 - it reflects the state of the input directory, not a
     bug."""
+
+
+class NoMatchingFilesError(FileDiscoveryError):
+    """Nothing in the location matches file_pattern. `unmatched` lists the
+    files that ARE there but didn't match (e.g. a .xlsx saved where the
+    pattern expects .csv) so a watcher can point at them instead of
+    silently seeing an 'empty' directory."""
+
+    def __init__(self, message: str, unmatched: list[str]):
+        super().__init__(message)
+        self.unmatched = unmatched
 
 
 @dataclass(frozen=True)
@@ -72,7 +86,9 @@ def _s3_candidates(path: str, s3: S3Connector) -> list[tuple[str, str, datetime]
     return results
 
 
-def discover_files(location: SourceLocation, s3: S3Connector | None) -> list[DiscoveredFile]:
+def discover_files(
+    location: SourceLocation, s3: S3Connector | None, *, strict: bool = True
+) -> list[DiscoveredFile]:
     """Lists location.path, filters to files matching location.file_pattern,
     and computes each match's sort_key per location.multi_file.order_by.
     Raises FileDiscoveryError if nothing matches, or if order_by is
@@ -82,6 +98,8 @@ def discover_files(location: SourceLocation, s3: S3Connector | None) -> list[Dis
     assert selection is not None, "discover_files requires location.multi_file to be set"
     assert location.file_pattern is not None  # enforced by SourceLocation's own validator
 
+    if location.kind == "sftp":
+        raise FileDiscoveryError("SFTP discovery is not yet implemented")
     if location.kind == "local":
         candidates = _local_candidates(location.path)
     else:
@@ -92,8 +110,10 @@ def discover_files(location: SourceLocation, s3: S3Connector | None) -> list[Dis
     pattern = compile_pattern(location.file_pattern)
     matched = [(name, full_path, mtime) for name, full_path, mtime in candidates if pattern.match(name)]
     if not matched:
-        raise FileDiscoveryError(
-            f"no files matching {location.file_pattern!r} found in {location.path!r}"
+        unmatched = sorted(name for name, _, _ in candidates)
+        hint = f" (present but not matching: {', '.join(unmatched)})" if unmatched else ""
+        raise NoMatchingFilesError(
+            f"no files matching {location.file_pattern!r} found in {location.path!r}{hint}", unmatched
         )
 
     discovered = []
@@ -106,6 +126,14 @@ def discover_files(location: SourceLocation, s3: S3Connector | None) -> list[Dis
             try:
                 sort_key = datetime.strptime(token_value, selection.filename_timestamp_format)
             except ValueError as exc:
+                if not strict:
+                    # A watcher must not let one misnamed file hide every
+                    # good one - skip it loudly instead of raising.
+                    log.warning(
+                        "skipping %r: matched %r but token %r does not parse as %r",
+                        name, location.file_pattern, token_value, selection.filename_timestamp_format,
+                    )
+                    continue
                 raise FileDiscoveryError(
                     f"filename {name!r} matched {location.file_pattern!r} but its token "
                     f"{token_value!r} does not parse as {selection.filename_timestamp_format!r}: {exc}"

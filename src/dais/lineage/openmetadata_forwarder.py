@@ -69,6 +69,69 @@ def _put(path: str, body: dict) -> dict:
     return resp.json() if resp.content else {}
 
 
+def _get(path: str) -> dict | None:
+    resp = requests.get(f"{OPENMETADATA_URL}/{path}", headers=_headers(), timeout=10)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _patch(path: str, ops: list[dict]) -> None:
+    headers = {**_headers(), "Content-Type": "application/json-patch+json"}
+    resp = requests.patch(f"{OPENMETADATA_URL}/{path}", headers=headers, json=ops, timeout=10)
+    resp.raise_for_status()
+
+
+def _om_type(source_type: str | None) -> str:
+    """Best-effort OpenLineage/Postgres/DAIS type name -> OpenMetadata
+    DataType. Anything unrecognised (dbt-ol sends no schema facet without a
+    catalog, so columns known only from column lineage carry no type at
+    all) is UNKNOWN rather than a wrong guess."""
+    t = (source_type or "").lower()
+    if t.startswith(("text", "varchar", "character", "string", "char")):
+        return "VARCHAR"
+    if t.startswith(("numeric", "decimal", "double", "float", "real")):
+        return "NUMERIC"
+    if t.startswith("bigint"):
+        return "BIGINT"
+    if t.startswith(("int", "smallint")):
+        return "INT"
+    if t.startswith("bool"):
+        return "BOOLEAN"
+    if t == "date":
+        return "DATE"
+    if t.startswith("timestamp") and "with time zone" in t:
+        return "TIMESTAMPZ"
+    if t.startswith("timestamp"):
+        return "TIMESTAMP"
+    return "UNKNOWN"
+
+
+def _table_fqn(host: str, port: str, dbname: str, schema_table: str) -> str:
+    return f"dais_postgres_{host}_{port}.{dbname}.{schema_table}"
+
+
+def _ensure_columns(table_fqn: str, wanted: dict[str, str | None]) -> None:
+    """Adds any of `wanted` (column -> source type) the OpenMetadata table
+    doesn't have yet. Only ever appends: existing columns - and anything
+    curated on them, like glossary tags - are never replaced."""
+    table = _get(f"tables/name/{table_fqn}?fields=columns")
+    if table is None:
+        return
+    existing = {c["name"] for c in table.get("columns", [])}
+    ops = []
+    for name, source_type in wanted.items():
+        if name in existing:
+            continue
+        column = {"name": name, "dataType": _om_type(source_type)}
+        if column["dataType"] == "VARCHAR":
+            column["dataLength"] = 255
+        ops.append({"op": "add", "path": "/columns/-", "value": column})
+    if ops:
+        _patch(f"tables/name/{table_fqn}", ops)
+
+
 def _parse_table_dataset(namespace: str, name: str) -> tuple[str, str, str, str] | None:
     """(host, port, dbname, schema.table split) if this dataset is a real
     Postgres table by LineageEmitter's own identity convention, else None
@@ -109,6 +172,14 @@ def _ensure_table_entity(host: str, port: str, dbname: str, schema_table: str) -
     )
     _put("databases", {"name": dbname, "service": service_name})
     _put("databaseSchemas", {"name": schema, "database": f"{service_name}.{dbname}"})
+    # Create the table only if it isn't there. Re-PUTting an EXISTING table
+    # (which carries no `columns` in this body) is read by OpenMetadata as a
+    # column change and it prunes the column-level lineage pointing at that
+    # table - so every later event for the same table used to silently wipe
+    # column lineage an earlier event had just written.
+    existing = _get(f"tables/name/{service_name}.{dbname}.{schema}.{table}")
+    if existing is not None:
+        return existing["id"]
     table_body = _put(
         "tables", {"name": table, "databaseSchema": f"{service_name}.{dbname}.{schema}"}
     )
@@ -136,14 +207,28 @@ def _ensure_pipeline_entity(namespace: str, job_name: str) -> str:
     return pipeline_body["id"]
 
 
-def _add_lineage_edge(from_id: str, to_id: str, pipeline_id: str) -> None:
+# Last non-empty columnsLineage written per (from, to) table pair. An edge is
+# a single object in OpenMetadata, and DAIS's own step event (no column
+# facets for a gold step) can arrive after dbt-ol's (which has them) for the
+# SAME table pair - without this, that later plain PUT would wipe the column
+# lineage. Process-local, like _run_datasets.
+_edge_columns_cache: dict[tuple[str, str], list[dict]] = {}
+
+
+def _add_lineage_edge(from_id: str, to_id: str, pipeline_id: str, columns_lineage: list[dict] | None = None) -> None:
+    columns_lineage = columns_lineage or _edge_columns_cache.get((from_id, to_id)) or []
+    if columns_lineage:
+        _edge_columns_cache[(from_id, to_id)] = columns_lineage
+    details: dict = {"pipeline": {"id": pipeline_id, "type": "pipeline"}}
+    if columns_lineage:
+        details["columnsLineage"] = columns_lineage
     _put(
         "lineage",
         {
             "edge": {
                 "fromEntity": {"id": from_id, "type": "table"},
                 "toEntity": {"id": to_id, "type": "table"},
-                "lineageDetails": {"pipeline": {"id": pipeline_id, "type": "pipeline"}},
+                "lineageDetails": details,
             }
         },
     )
@@ -168,7 +253,38 @@ def _dataset_key(dataset: dict) -> tuple[str, str]:
 # and lost on restart - an acceptable limitation for a dev-local
 # forwarder; a run in flight across a restart simply won't get lineage
 # recorded for the step(s) that started before it.
-_run_datasets: dict[tuple[str, str], dict[str, set[tuple[str, str]]]] = {}
+_run_datasets: dict[tuple[str, str], dict] = {}
+
+
+def _new_state() -> dict:
+    return {
+        "inputs": set(),
+        "outputs": set(),
+        "schemas": {},  # dataset key -> {column: source type}
+        "column_lineage": {},  # output dataset key -> {out column: [(input key, input column, description)]}
+    }
+
+
+def _collect_facets(state: dict, event: dict) -> None:
+    """Standard OpenLineage `schema` and `columnLineage` dataset facets -
+    emitted by DAIS's own LineageEmitter for raw/stage and by dbt-ol for
+    gold - are what carry column-level detail. Nothing else in an event does."""
+    for side in ("inputs", "outputs"):
+        for dataset in event.get(side) or []:
+            key = _dataset_key(dataset)
+            facets = dataset.get("facets") or {}
+            for field in (facets.get("schema") or {}).get("fields", []):
+                state["schemas"].setdefault(key, {})[field["name"]] = field.get("type")
+            if side != "outputs":
+                continue
+            for out_column, info in ((facets.get("columnLineage") or {}).get("fields") or {}).items():
+                description = info.get("transformationDescription")
+                for input_field in info.get("inputFields", []):
+                    source = (_dataset_key(input_field), input_field["field"], description)
+                    # START and COMPLETE both carry the same facets - record each mapping once.
+                    sources = state["column_lineage"].setdefault(key, {}).setdefault(out_column, [])
+                    if source not in sources:
+                        sources.append(source)
 
 
 def _handle_run_event(event: dict) -> None:
@@ -179,32 +295,59 @@ def _handle_run_event(event: dict) -> None:
         return
 
     key = (run_id, job_name)
-    state = _run_datasets.setdefault(key, {"inputs": set(), "outputs": set()})
+    state = _run_datasets.setdefault(key, _new_state())
     state["inputs"].update(_dataset_key(d) for d in event.get("inputs") or [])
     state["outputs"].update(_dataset_key(d) for d in event.get("outputs") or [])
+    _collect_facets(state, event)
 
     if event.get("eventType") != "COMPLETE":
         return
     state = _run_datasets.pop(key)
 
-    def _table_ids(datasets: set[tuple[str, str]]) -> list[str]:
-        ids = []
-        for ds_namespace, ds_name in datasets:
-            parsed = _parse_table_dataset(ds_namespace, ds_name)
-            if parsed is None:
-                continue
-            host, port, dbname, schema_table = parsed
-            ids.append(_ensure_table_entity(host, port, dbname, schema_table))
-        return ids
+    tables: dict[tuple[str, str], tuple[str, str]] = {}  # dataset key -> (table id, table fqn)
+    for ds_key in state["inputs"] | state["outputs"]:
+        parsed = _parse_table_dataset(*ds_key)
+        if parsed is None:
+            continue
+        host, port, dbname, schema_table = parsed
+        tables[ds_key] = (
+            _ensure_table_entity(host, port, dbname, schema_table),
+            _table_fqn(host, port, dbname, schema_table),
+        )
 
-    input_ids = _table_ids(state["inputs"])
-    output_ids = _table_ids(state["outputs"])
-    if not input_ids or not output_ids:
+    # Every column an edge will reference must exist first: the ones a
+    # schema facet lists, plus the ones only column lineage mentions.
+    wanted: dict[tuple[str, str], dict[str, str | None]] = {}
+    for ds_key, columns in state["schemas"].items():
+        wanted.setdefault(ds_key, {}).update(columns)
+    for out_key, by_column in state["column_lineage"].items():
+        for out_column, sources in by_column.items():
+            wanted.setdefault(out_key, {}).setdefault(out_column, None)
+            for in_key, in_column, _description in sources:
+                wanted.setdefault(in_key, {}).setdefault(in_column, None)
+    for ds_key, columns in wanted.items():
+        if ds_key in tables:
+            _ensure_columns(tables[ds_key][1], columns)
+
+    input_keys = [k for k in state["inputs"] if k in tables]
+    output_keys = [k for k in state["outputs"] if k in tables]
+    if not input_keys or not output_keys:
         return
 
     pipeline_id = _ensure_pipeline_entity(namespace, job_name)
-    for from_id, to_id in product(input_ids, output_ids):
-        _add_lineage_edge(from_id, to_id, pipeline_id)
+    for from_key, to_key in product(input_keys, output_keys):
+        from_id, from_fqn = tables[from_key]
+        to_id, to_fqn = tables[to_key]
+        columns_lineage = []
+        for out_column, sources in state["column_lineage"].get(to_key, {}).items():
+            from_columns = list(dict.fromkeys(f"{from_fqn}.{c}" for k, c, _d in sources if k == from_key))
+            if from_columns:
+                function = next((d for _k, _c, d in sources if d), None)
+                entry = {"fromColumns": from_columns, "toColumn": f"{to_fqn}.{out_column}"}
+                if function:
+                    entry["function"] = function
+                columns_lineage.append(entry)
+        _add_lineage_edge(from_id, to_id, pipeline_id, columns_lineage)
 
 
 @app.post("/api/v1/lineage")

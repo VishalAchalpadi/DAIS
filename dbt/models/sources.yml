@@ -44,3 +44,8 @@ sources:
     schema: data_in
     tables:
       - name: sales_stage
+
+  - name: fx_rates_ingest
+    schema: data_in
+    tables:
+      - name: fx_rates_stage

@@ -41,6 +41,13 @@ source:
       mode: all
       order_by: arrival_time
       on_earlier_failure: continue
+    watch:
+      poll_interval_seconds: 30
+      expected_by: "09:00"
+      expected_timezone: "America/New_York"
+      missed_arrival_alert:
+        channel: log
+        destination: "n/a"
 
 parser:
   type: csv

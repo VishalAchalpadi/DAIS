@@ -153,3 +153,24 @@ def test_discover_files_from_s3():
         "s3://test-bucket/holdings/incoming/HOLDINGS_20260301.txt",
         "s3://test-bucket/holdings/incoming/HOLDINGS_20260302.txt",
     ]
+
+
+def test_non_strict_discovery_skips_a_misnamed_file_instead_of_hiding_every_file(tmp_path):
+    _touch(tmp_path, "HOLDINGS_20260301.txt")
+    _touch(tmp_path, "HOLDINGS_notadate.txt")
+    loc = _location(tmp_path, mode="all", order_by="filename_timestamp", fmt="%Y%m%d")
+
+    with pytest.raises(FileDiscoveryError, match="does not parse"):
+        discover_files(loc, None)  # on-demand triggers stay strict
+
+    files = discover_files(loc, None, strict=False)  # the sensor does not
+    assert [f.path.split(os.sep)[-1] for f in files] == ["HOLDINGS_20260301.txt"]
+
+
+def test_no_match_error_names_the_files_that_were_present(tmp_path):
+    from dais.ingestion.file_discovery import NoMatchingFilesError
+
+    _touch(tmp_path, "HOLDINGS_20260301.xlsx")  # right stem, wrong extension
+    with pytest.raises(NoMatchingFilesError, match="HOLDINGS_20260301.xlsx") as exc:
+        discover_files(_location(tmp_path), None)
+    assert exc.value.unmatched == ["HOLDINGS_20260301.xlsx"]

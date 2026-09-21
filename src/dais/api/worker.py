@@ -4,13 +4,17 @@ response is sent - never inline in the request.
 """
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from dais.api.runs import RunRegistry
 from dais.db import build_s3_connector_for_spec
+from dais.ingestion.archiver import archive_source_file, should_archive
 from dais.pipeline import run_pipeline
 from dais.resilience.connectors.s3_connector import S3Connector
 from dais.spec.models import PipelineSpec
+
+log = logging.getLogger(__name__)
 
 ConnectorFactory = Callable[[PipelineSpec], tuple]
 S3Factory = Callable[[PipelineSpec], S3Connector]
@@ -28,16 +32,25 @@ def execute_pipeline_background(
     try:
         connector, connection_params = connector_factory(spec)
         try:
+            s3 = s3_factory(spec)
             result = run_pipeline(
                 spec,
                 file_path=file_path,
                 connector=connector,
                 connection_params=connection_params,
-                s3=s3_factory(spec),
+                s3=s3,
                 run_id=run_id,
                 stop_after=stop_after,
             )
             registry.update_from_result(run_id, result)
+            if should_archive(spec, result.status, result.layer_reached, stop_after):
+                # The data is already landed - failing to move the file must
+                # not turn a successful run into a failed one.
+                try:
+                    dest = archive_source_file(spec, file_path, s3)
+                    log.info("archived %s -> %s", file_path, dest)
+                except Exception:
+                    log.exception("run %s succeeded but archiving %s failed", run_id, file_path)
         finally:
             connector.close()
     except Exception as exc:  # never fail silently - the run must land in a terminal state

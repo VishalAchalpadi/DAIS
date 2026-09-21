@@ -1,0 +1,138 @@
+# =========================================================================
+# Pipeline Spec: fx_rates_ingest
+#
+# Daily FX rate files, one row per (date, currency pair, source snapshot).
+# Stops at STAGE on purpose: gold is a separate, independently orchestrated
+# build (gold_builds/fx_rates_gold.yaml, depends_on: fx_rates_ingest) that
+# Dagster runs automatically after this pipeline's stage asset updates.
+#
+# File format (header is case-sensitive, exactly as the feed sends it):
+#   fxDate,fromCCY,toCCY,fxRate,sourceType
+#   20260920,USD,INR,100,Reuters12PM
+#
+# File name: FX_RATES_<YYYYMMDDHHMM>.csv, e.g. FX_RATES_202609201200.csv.
+# The timestamp orders multiple files in a day and dates the arrival for the
+# missed-file alert. Drop it in data/fx_rates/incoming/ - the watch sensor
+# picks it up, and on success the file moves to
+# data/fx_rates/archive/<YYYYMMDD>/.
+# =========================================================================
+
+pipeline_name: fx_rates_ingest
+description: "Ingests daily FX rate CSV files into raw/stage; gold is a separate orchestrated build"
+owner: "treasury-data-team"
+
+execution:
+  stop_after: stage
+
+database:
+  platform: postgres
+  connection: "aurora_postgres_prod"
+
+monitoring:
+  schema: control
+  table: process_monitor
+
+source:
+  type: file
+  format: csv
+  location:
+    kind: local
+    path: "./data/fx_rates/incoming/"
+    file_pattern: "FX_RATES_{date}.csv"
+    multi_file:
+      mode: all
+      order_by: filename_timestamp
+      filename_timestamp_format: "%Y%m%d%H%M"
+      on_earlier_failure: continue
+    watch:
+      poll_interval_seconds: 15
+      expected_by: "23:00"            # change to the real delivery deadline
+      expected_timezone: "America/New_York"
+      missed_arrival_alert:
+        channel: log                  # use `webhook` + a URL for a real notification
+        destination: "n/a"
+    # Move each file here once its run has SUCCEEDED (quarantined/failed files
+    # stay in incoming/ for review). Remove this block to leave files in place.
+    archive:
+      path: "./data/fx_rates/archive/"
+      date_subdirs: true              # -> archive/<YYYYMMDD>/<file>
+
+parser:
+  type: csv
+  has_header: true
+
+control_gates:
+  file_size:
+    min_bytes: 20
+    max_bytes: 10000000
+  row_count:
+    min_rows: 1
+    max_rows: 100000
+  on_fail: quarantine_file
+
+raw:
+  schema: data_in
+  table: fx_rates_raw
+  ddl_mode: create_if_not_exists
+  preserve_metadata:
+    - file_name
+    - file_path
+    - file_checksum
+    - load_timestamp
+    - batch_id
+  checksum_dedup: true
+
+quality:
+  integrity_mode: row_level
+  rules:
+    - column: fxDate
+      checks: [not_null, valid_date]
+      cast_to: date
+      format: "%Y%m%d"
+    - column: fromCCY
+      checks: [not_null, non_empty]
+      lookup:                          # must be a known currency in core.t_ref_currency
+        type: sql
+        query: >
+          SELECT 1 FROM core.t_ref_currency
+          WHERE currency_code = :value
+        on_fail: quarantine
+    - column: toCCY
+      checks: [not_null, non_empty]
+      lookup:
+        type: sql
+        query: >
+          SELECT 1 FROM core.t_ref_currency
+          WHERE currency_code = :value
+        on_fail: quarantine
+    - column: fxRate
+      checks: [not_null, is_numeric, greater_than: 0]
+      cast_to: decimal
+      precision: 18
+      scale: 8
+    - column: sourceType
+      checks: [not_null, non_empty]
+  quarantine:
+    location: "./data/fx_rates/quarantine/"
+    kind: local
+    alert:
+      channel: log
+      destination: "n/a"
+
+stage:
+  schema: data_in
+  table: fx_rates_stage
+  ddl_mode: create_if_not_exists
+  business_key: ["fxDate", "fromCCY", "toCCY", "sourceType"]
+  write_mode: upsert
+
+resilience:
+  retry:
+    max_attempts: 3
+    backoff: exponential
+    base_delay_seconds: 1
+    jitter: true
+
+lineage:
+  namespace: "datamesh-prod"
+  job_name: fx_rates_ingest
