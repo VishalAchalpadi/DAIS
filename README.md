@@ -27,13 +27,13 @@ dbt/                         dbt-core project (gold layer)
 src/dais/
   spec/                      PipelineSpec pydantic model + YAML loader
   parsers/                   csv, delimited, fixed_width, json, xml - common Parser interface
-  quality/                   control gates, pandera-based DQ rules, quarantine, alerting
+  quality/                   control gates, Great Expectations-based DQ rules, quarantine, alerting
   resilience/                retry wrapper + Postgres/S3 connectors
   medallion/                 bronze.py, silver.py, gold.py, exports.py (Iceberg)
   monitoring/                shared control.process_monitor table
   secrets/                   SecretsProvider: Vault (prod) / hardcoded (phase-1 fallback)
   business_process/          SLA group model, loader, evaluator
-  lineage/                   OpenLineage emitter
+  lineage/                   OpenLineage emitter + OpenMetadata forwarder
   api/                       FastAPI trigger/status layer
   pipeline.py                the orchestrator - wires all of the above together
   cli.py                     `dais run --spec ... --file ...`
@@ -157,7 +157,7 @@ trust the model.
 
 | Value | What it checks | Notes |
 |---|---|---|
-| `not_null` | Column has no nulls. | Implemented as `nullable=False` on the pandera column, not a `Check` - if omitted, the column is nullable. |
+| `not_null` | Column has no nulls. | Implemented as a Great Expectations `expect_column_values_to_not_be_null` expectation - if omitted, the column is nullable. |
 | `non_empty` | Non-null values aren't `""`. | Nulls still pass this one - pair with `not_null` if both matter. |
 | `valid_date` | Non-null values parse under `format` (a `strptime` pattern, e.g. `"%Y%m%d"`, `"%Y-%m-%d"`). | **Requires `format` on the same rule** - the spec fails to load without it. |
 | `is_numeric` | Non-null values cast to a float without error. | Doesn't imply `cast_to: decimal` - that's a separate, explicit field. |
@@ -607,7 +607,9 @@ Two things worth knowing if you're touching this code:
 **Inspecting the resulting lineage graph**: with no `OPENLINEAGE_URL` set,
 events print to the console (`ConsoleTransport`) - visible directly in
 `GoldRunResult.stdout`. Point `OPENLINEAGE_URL` at a real OpenLineage
-backend (Marquez, etc.) to see gold jobs and datasets show up connected to
+backend (DAIS ships a forwarder to OpenMetadata - see
+`src/dais/lineage/openmetadata_forwarder.py`) to see gold jobs and datasets
+show up connected to
 the same upstream stage tables raw/stage already reports lineage for.
 `tests/test_gold_lineage.py` verifies this end-to-end against the real
 `portfolio_summary_gold` example: a real `dbt-ol run` subprocess, with a
