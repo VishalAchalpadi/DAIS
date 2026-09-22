@@ -192,14 +192,19 @@ def _ensure_pipeline_entity(namespace: str, job_name: str) -> str:
         "services/pipelineServices",
         {
             "name": service_name,
-            "serviceType": "Dagster",
+            # A run reaching this forwarder may have been triggered via the
+            # DAIS API directly, Control-M, or Dagster (src/dais/orchestration/
+            # dagster/) - this event carries no reliable signal of which.
+            # "CustomPipeline" is OpenMetadata's neutral serviceType for a
+            # pipeline source it doesn't have a named connector for, so the
+            # service type doesn't falsely claim one specific orchestrator.
+            "serviceType": "CustomPipeline",
             "connection": {
                 # Descriptive only, like the Postgres connection config in
                 # _ensure_table_entity - lineage edges are written directly
                 # via this API, OpenMetadata never actually connects out
-                # using this config. DAIS orchestrates through Dagster
-                # (src/dais/orchestration/dagster/), not Airflow.
-                "config": {"type": "Dagster", "host": "http://localhost:3000", "token": "unset"}
+                # using this config.
+                "config": {"type": "CustomPipeline", "sourcePythonClass": "dais.lineage.openmetadata_forwarder"}
             },
         },
     )
