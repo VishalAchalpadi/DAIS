@@ -94,11 +94,6 @@ quality:
       cast_to: decimal
       precision: 18
       scale: 2
-    - column: net_asset_value
-      checks: [not_null, is_numeric, greater_than_or_equal: 0]
-      cast_to: decimal
-      precision: 18
-      scale: 6
     - column: base_currency
       checks: [not_null]
       lookup:                      # SQL-based reference check, not a static list
@@ -107,21 +102,6 @@ quality:
           SELECT 1 FROM ref.currencies
           WHERE currency_code = :value
         on_fail: quarantine
-    - column: total_net_assets_usd
-      checks: [not_null, is_numeric, greater_than_or_equal: 0]
-      cast_to: decimal
-      precision: 18
-      scale: 2
-    - column: shares
-      checks: [not_null, is_numeric, greater_than_or_equal: 0]
-      cast_to: decimal
-      precision: 18
-      scale: 4
-    - column: cash
-      checks: [not_null, is_numeric, greater_than_or_equal: 0]
-      cast_to: decimal
-      precision: 18
-      scale: 2
   quarantine:
     kind: local
     location: "./data/assets/quarantine/"
@@ -140,23 +120,31 @@ stage:
   write_mode: upsert
 
 # ------------------------------------------------------------------------
-# GOLD layer - company-wide daily AUM, aggregated from every portfolio's
-# stage-layer total_net_assets_usd. Fewer rows than stage (one row per
-# as_of_date instead of one per portfolio). SCD Type 2, keyed on
-# as_of_date itself (a real business column already in stage, unlike
-# price_gold which has to derive it from the source file name) - a
-# version only increments if a later run recomputes a different
-# company_aum/daily_aum_change_pct for an as_of_date already seen (e.g.
-# a late-arriving correction for an earlier date). Columns: as_of_date,
-# company_aum, daily_aum_change_pct, version, effective_datetime,
-# expiry_datetime, active_flag, scd_pk (primary key).
+# GOLD layer - portfolio-level pass-through of stage plus tna_usd, an
+# FX-converted total_net_assets looked up from fx_rates_ingest's stage
+# table (dbt/models/asset_gold.sql). SCD Type 2, keyed on
+# [portfolio_cd, as_of_date] - a version only increments if a later run
+# recomputes a different total_net_assets/base_currency/tna_usd for a
+# (portfolio_cd, as_of_date) already seen (e.g. a late-arriving
+# correction, or an FX rate that wasn't available yet on an earlier
+# run). Columns: portfolio_cd, as_of_date, total_net_assets,
+# base_currency, tna_usd, version, effective_datetime, expiry_datetime,
+# active_flag, scd_pk (primary key).
+#
+# NOTE: this used to aggregate every portfolio into one company-wide
+# daily AUM row (company_aum/daily_aum_change_pct) - that rollup was
+# dropped when the grain moved to portfolio-level. It also means
+# portfolio_summary_gold (gold_builds/portfolio_summary_gold.yaml),
+# which still reads total_net_assets_usd from THIS pipeline's stage
+# table, is currently broken - deliberately left that way; see
+# dbt/models/asset_gold.sql's header.
 # ------------------------------------------------------------------------
 gold:
   schema: core
   dbt_project: "dbt/"
   dbt_select: "asset_gold"
   scd_type: 2
-  scd_key: ["as_of_date"]
+  scd_key: ["portfolio_cd", "as_of_date"]
 
 # ------------------------------------------------------------------------
 # Resilience - applies to all Postgres/S3/API calls in this pipeline
