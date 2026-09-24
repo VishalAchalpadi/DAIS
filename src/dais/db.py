@@ -8,7 +8,7 @@ from __future__ import annotations
 from dais.resilience.connectors.postgres_connector import PostgresConnector
 from dais.resilience.connectors.s3_connector import S3Connector
 from dais.secrets.factory import get_secrets_provider
-from dais.spec.models import PipelineSpec
+from dais.spec.models import GoldBuildDatabaseConfig, PipelineSpec
 
 
 def build_s3_connector_for_spec(spec: PipelineSpec) -> S3Connector:
@@ -36,3 +36,23 @@ def build_connector_for_spec(spec: PipelineSpec) -> tuple[PostgresConnector, dic
     }
     connector = PostgresConnector(retry_cfg=spec.resilience.retry, **connection_params)
     return connector, connection_params
+
+
+def build_connection_params_for_gold_build(database: GoldBuildDatabaseConfig) -> dict:
+    """A gold_builds/*.yaml spec has no PipelineSpec to hand run_gold_build()
+    a connector for - it isn't a PipelineSpec, and run_gold_build() shells
+    out to dbt rather than using a PostgresConnector directly (see
+    medallion/gold.py) - so this resolves just the host/port/dbname/user/
+    password kwargs that call needs, the same secret-resolution half of
+    build_connector_for_spec above, without the connector-construction half
+    that only makes sense for a real PipelineSpec run."""
+    if database.platform != "postgres":
+        raise NotImplementedError(f"platform {database.platform!r} has no connector implementation yet")
+    secret = get_secrets_provider().get_secret(database.connection)
+    return {
+        "host": secret["host"],
+        "port": int(secret["port"]),
+        "dbname": secret["dbname"],
+        "user": secret["user"],
+        "password": secret["password"],
+    }

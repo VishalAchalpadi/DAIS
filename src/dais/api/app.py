@@ -14,9 +14,12 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
+from dais.api.gold_build_runs import GoldBuildRunRegistry
+from dais.api.gold_build_worker import execute_gold_build_background
 from dais.api.models import (
     BusinessProcessMemberStatus,
     BusinessProcessStatusResponse,
+    GoldBuildRunStatusResponse,
     QuarantinedRowPayload,
     QuarantineRecordSummaryResponse,
     QuarantineSpecSummaryResponse,
@@ -45,21 +48,24 @@ from dais.ingestion.file_discovery import FileDiscoveryError, resolve_files
 from dais.pipeline import _read_source_bytes
 from dais.quality.quarantine_review import list_quarantine_records, read_quarantine_record, resubmit_corrections
 from dais.quality.row_validator import GX_DATA_DOCS_DIR
-from dais.spec.loader import SpecLoadError, load_spec
+from dais.spec.loader import SpecLoadError, load_gold_build_spec, load_spec
 from dais.spec.models import BARE_CHECK_NAMES, COMPARISON_CHECK_OPS, PipelineSpec
 
 
 def create_app(
     specs_dir: str | Path = "specs",
     business_processes_dir: str | Path = "business_processes",
+    gold_builds_dir: str | Path = "gold_builds",
     connector_factory: ConnectorFactory = build_connector_for_spec,
     s3_factory: S3Factory = build_s3_connector_for_spec,
     api_key: str | None = None,
 ) -> FastAPI:
     app = FastAPI(title="DAIS Pipeline API")
     registry = RunRegistry()
+    gold_build_registry = GoldBuildRunRegistry()
     specs_dir = Path(specs_dir)
     business_processes_dir = Path(business_processes_dir)
+    gold_builds_dir = Path(gold_builds_dir)
     expected_api_key = api_key if api_key is not None else os.environ.get("DAIS_API_KEY")
 
     def check_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -168,6 +174,50 @@ def create_app(
             quarantine_location=record.quarantine_location,
             failure_reasons=record.failure_reasons,
         )
+
+    def load_gold_build_spec_or_404(gold_build_name: str):
+        try:
+            return load_gold_build_spec(gold_builds_dir / f"{gold_build_name}.yaml")
+        except SpecLoadError as exc:
+            raise HTTPException(
+                status_code=404, detail=f"gold build {gold_build_name!r} not found or invalid: {exc}"
+            ) from exc
+
+    @app.post(
+        "/gold-builds/{gold_build_name}/run",
+        status_code=status.HTTP_202_ACCEPTED,
+        response_model=RunResponse,
+        dependencies=[Depends(check_api_key)],
+    )
+    def trigger_gold_build_run(gold_build_name: str, background_tasks: BackgroundTasks) -> RunResponse:
+        spec = load_gold_build_spec_or_404(gold_build_name)
+        run_id = gold_build_registry.start(gold_build_name)
+        if run_id is None:
+            raise HTTPException(
+                status_code=409, detail=f"gold build {gold_build_name!r} is already running"
+            )
+        background_tasks.add_task(execute_gold_build_background, gold_build_registry, spec, run_id)
+        return RunResponse(run_id=run_id, status="running")
+
+    @app.get(
+        "/gold-builds/runs/{run_id}/status",
+        response_model=GoldBuildRunStatusResponse,
+        dependencies=[Depends(check_api_key)],
+    )
+    def get_gold_build_run_status(run_id: str) -> GoldBuildRunStatusResponse:
+        record = gold_build_registry.get(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return GoldBuildRunStatusResponse(
+            run_id=record.run_id,
+            gold_build_name=record.gold_build_name,
+            status=record.status,
+            error=record.error,
+        )
+
+    @app.get("/gold-builds", dependencies=[Depends(check_api_key)])
+    def list_gold_builds() -> list[str]:
+        return sorted(p.stem for p in gold_builds_dir.glob("*.yaml"))
 
     @app.get(
         "/business-processes/{name}/status",

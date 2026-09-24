@@ -62,13 +62,25 @@ which of two unrelated mechanisms it uses:
   needed.
 - **Separate `gold_builds/*.yaml`** (`regional_sales_gold` depends on
   `sales_ingest`; `portfolio_summary_gold` depends on `holdings_ingest` +
-  `asset_ingest`; `fx_rates_gold` depends on `fx_rates_ingest`): these are dbt builds, not `PipelineSpec`s. **There is
-  no HTTP API endpoint for them at all** — `POST /pipelines/{name}/run`
-  only ever loads a `PipelineSpec` (`load_spec`), never a `GoldBuildSpec`.
-  A gold build is runnable only via its own Dagster job, or a direct
-  Python call to `run_gold_build()` (`src/dais/medallion/gold.py`). If
-  you need one to run right after its dependency's stage lands, see the
-  "auto-materialize" note at the bottom of this doc.
+  `asset_ingest`; `fx_rates_gold` depends on `fx_rates_ingest`): these are
+  dbt builds, not `PipelineSpec`s, so `POST /pipelines/{name}/run` (which
+  only ever loads a `PipelineSpec`) doesn't apply to them. They have their
+  **own** small API surface instead:
+  ```
+  POST /gold-builds/{gold_build_name}/run   -> 202 {run_id, status}
+  GET  /gold-builds/runs/{run_id}/status    -> {run_id, gold_build_name, status, error}
+  GET  /gold-builds                         -> [gold_build_name, ...]
+  ```
+  A gold build is also still runnable via its own Dagster job, or a direct
+  Python call to `run_gold_build()` (`src/dais/medallion/gold.py`) — the
+  API endpoint is a third caller of that same function, not a new
+  execution path. No `layer_reached`/`checksum` in its status response (a
+  gold build has no input file and no raw/stage/gold ladder of its own);
+  a second `POST` while one's still running for the same build returns
+  `409`. If you need one to run right after its dependency's stage lands
+  automatically, see the "auto-materialize" note at the bottom of this doc
+  — that's still a Dagster-only capability, this endpoint is for triggering
+  it manually/from Control-M.
 - `benchmark_ingest` and `fund_positions_ingest` currently have **no gold
   layer at all** — neither an inline block nor a `gold_builds/*.yaml`
   depends on them. Their pipelines stop at `stage`.
@@ -248,7 +260,9 @@ file moves to `data/fx_rates/archive/<YYYYMMDD>/`. Full walkthrough:
 [fx-rates-pipeline.md](fx-rates-pipeline.md).
 
 **Dagster** — job `fx_rates_ingest_job`, op `fx_rates_ingest__stage`;
-gold job `fx_rates_gold_job` (no config).
+gold job `fx_rates_gold_job` (no config). To run the gold build manually
+instead of waiting for Dagster's automation sensor: `POST
+/gold-builds/fx_rates_gold/run` (see "Gold layer: two mechanisms" above).
 
 ---
 
@@ -279,10 +293,17 @@ Then, separately, run its gold build — see `regional_sales_gold` below.
 
 ---
 
-## regional_sales_gold (gold_builds/*.yaml — dbt, no HTTP API)
+## regional_sales_gold (gold_builds/*.yaml — dbt)
 
-Depends on `sales_ingest`'s stage table. **No API endpoint exists for
-this** — Dagster or a direct Python call are the only ways to run it.
+Depends on `sales_ingest`'s stage table. Three ways to run it — DAIS API,
+Dagster, or a direct Python call:
+
+**DAIS API:**
+```bash
+curl -sf -X POST http://localhost:8000/gold-builds/regional_sales_gold/run -H "X-API-Key: dev-key"
+# -> {"run_id": "...", "status": "running"}
+curl -sf http://localhost:8000/gold-builds/runs/<run_id>/status -H "X-API-Key: dev-key"
+```
 
 **Dagster** — job `regional_sales_gold_job`, no Launchpad config needed
 (the `dbt` resource is fully configured in `definitions.py`; the model
@@ -293,8 +314,8 @@ selection is baked into the `@dbt_assets` decorator via `dbt.select:
 ```
 CLI: `dagster job execute -j regional_sales_gold_job -f src/dais/orchestration/dagster/definitions.py`
 
-**Direct Python call** (what the CLI ultimately does, useful for a script
-with no Dagster involved):
+**Direct Python call** (what both the CLI and the API endpoint above
+ultimately do, useful for a script with no server involved at all):
 ```python
 from dais.medallion.gold import run_gold_build
 from dais.spec.loader import load_gold_build_spec
@@ -305,13 +326,16 @@ result = run_gold_build(spec, host="localhost", port=5432, dbname="GEODS", user=
 
 ---
 
-## portfolio_summary_gold (gold_builds/*.yaml — dbt, no HTTP API)
+## portfolio_summary_gold (gold_builds/*.yaml — dbt)
 
 Depends on **both** `holdings_ingest` and `asset_ingest`'s stage tables —
-run both of those first (via either method above) or this build will
+run both of those first (via any method above) or this build will
 succeed against whatever stale/empty stage data already exists rather
 than failing loudly, since dbt has no way to know you meant to refresh
 its sources first.
+
+**DAIS API:** `POST /gold-builds/portfolio_summary_gold/run`, same shape as
+`regional_sales_gold` above.
 
 **Dagster** — job `portfolio_summary_gold_job`, no Launchpad config needed:
 ```yaml

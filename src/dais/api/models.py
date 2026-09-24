@@ -37,6 +37,16 @@ class RunStatusResponse(BaseModel):
     failure_reasons: list[str] = []
 
 
+class GoldBuildRunStatusResponse(BaseModel):
+    """No layer_reached/checksum/quarantine fields - a gold build has no
+    input file and no raw/stage/gold ladder of its own (api/gold_build_runs.py)."""
+
+    run_id: str
+    gold_build_name: str
+    status: str
+    error: str | None = None
+
+
 class BusinessProcessMemberStatus(BaseModel):
     pipeline_name: str
     success_layer: str
