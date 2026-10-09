@@ -188,21 +188,30 @@ def _ensure_table_entity(host: str, port: str, dbname: str, schema_table: str) -
 
 def _ensure_pipeline_entity(namespace: str, job_name: str) -> str:
     service_name = namespace
-    _put(
-        "services/pipelineServices",
-        {
-            "name": service_name,
-            "serviceType": "Dagster",
-            "connection": {
-                # Descriptive only, like the Postgres connection config in
-                # _ensure_table_entity - lineage edges are written directly
-                # via this API, OpenMetadata never actually connects out
-                # using this config. DAIS orchestrates through Dagster
-                # (src/dais/orchestration/dagster/), not Airflow.
-                "config": {"type": "Dagster", "host": "http://localhost:3000", "token": "unset"}
+    # GET-before-create, same reasoning as _ensure_table_entity: an
+    # unconditional re-PUT of an EXISTING service is not just wasted work -
+    # calling this twice in quick succession (e.g. sync_column_lineage
+    # pushing more than one stage->gold hop for the same pipeline, one per
+    # upstream table) has been observed to trip a transient 400 from
+    # OpenMetadata on the second near-simultaneous PUT of the identical
+    # entity. Skipping the redundant write avoids the race entirely rather
+    # than retrying around it.
+    if _get(f"services/pipelineServices/name/{service_name}") is None:
+        _put(
+            "services/pipelineServices",
+            {
+                "name": service_name,
+                "serviceType": "Dagster",
+                "connection": {
+                    # Descriptive only, like the Postgres connection config in
+                    # _ensure_table_entity - lineage edges are written directly
+                    # via this API, OpenMetadata never actually connects out
+                    # using this config. DAIS orchestrates through Dagster
+                    # (src/dais/orchestration/dagster/), not Airflow.
+                    "config": {"type": "Dagster", "host": "http://localhost:3000", "token": "unset"}
+                },
             },
-        },
-    )
+        )
     pipeline_body = _put("pipelines", {"name": job_name, "service": service_name})
     return pipeline_body["id"]
 

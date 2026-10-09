@@ -66,7 +66,21 @@ from {{ source_cte }} sd
 
 , current_active as (
 
-    select *
+    -- Explicit column list, not `select *` - sqllineage/dbt-ol's column-
+    -- lineage tracers don't resolve through a wildcard select, so a
+    -- wildcard here would make every downstream column (changed_or_new,
+    -- expired) look like it has no traceable upstream source at all.
+    -- This is exactly this model's own documented output column order.
+    select
+        {% for k in unique_key %}{{ k }},
+        {% endfor -%}
+        {% for c in tracked_columns %}{{ c }},
+        {% endfor -%}
+        version,
+        effective_datetime,
+        expiry_datetime,
+        active_flag,
+        scd_pk
     from {{ this }}
     where active_flag = true
 
@@ -74,7 +88,11 @@ from {{ source_cte }} sd
 
 changed_or_new as (
 
-    select sd.*
+    select
+        {% for k in unique_key %}sd.{{ k }}{% if not loop.last %},
+        {% endif %}{% endfor %},
+        {% for c in tracked_columns %}sd.{{ c }}{% if not loop.last %},
+        {% endif %}{% endfor %}
     from {{ source_cte }} sd
     left join current_active ca
         on {% for k in unique_key %}sd.{{ k }} = ca.{{ k }}{% if not loop.last %} and {% endif %}{% endfor %}
@@ -87,7 +105,15 @@ changed_or_new as (
 
 expired as (
 
-    select ca.*, current_timestamp as _expire_at
+    select
+        {% for k in unique_key %}ca.{{ k }},
+        {% endfor -%}
+        {% for c in tracked_columns %}ca.{{ c }},
+        {% endfor -%}
+        ca.version,
+        ca.effective_datetime,
+        ca.scd_pk,
+        current_timestamp as _expire_at
     from current_active ca
     inner join changed_or_new co
         on {% for k in unique_key %}ca.{{ k }} = co.{{ k }}{% if not loop.last %} and {% endif %}{% endfor %}

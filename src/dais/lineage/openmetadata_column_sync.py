@@ -158,6 +158,18 @@ def _push_hop(
     )
 
 
+def _normalize_schema_table(table: str) -> str:
+    """sqllineage sometimes returns a 2-part "schema.table" (from an
+    env_var-interpolated literal like "data_in"."asset_stage") and
+    sometimes a 3-part "db.schema.table" (from a fully-qualified dbt
+    source(), e.g. "GEODS"."data_in"."fx_rates_stage") for the exact same
+    kind of reference - normalize to the last two segments, lowercased
+    (Postgres folds unquoted identifiers to lowercase; schema/table names
+    in this codebase are never quoted-mixed-case, unlike some columns)."""
+    parts = table.split(".")
+    return ".".join(p.lower() for p in parts[-2:])
+
+
 def sync_column_lineage(spec: PipelineSpec, connection_params: dict) -> None:
     """Computes real column edges via lineage.column_lineage.build_lineage_graph
     (same function `dais lineage` already uses) and pushes them into
@@ -178,11 +190,40 @@ def sync_column_lineage(spec: PipelineSpec, connection_params: dict) -> None:
 
     if spec.gold is not None:
         gold_table = f"{spec.gold.schema_}.{spec.gold.dbt_select}"
+        gold_table_normalized = _normalize_schema_table(gold_table)
         stage_to_gold = [e for e in edges if e.source.layer == "stage" and e.target.layer == "gold"]
-        if stage_to_gold:
+
+        # A gold model can read more than one upstream table - e.g. a
+        # reference-data lookup like fx_rates_ingest's stage table, not
+        # just this pipeline's own stage table - so group by each edge's
+        # OWN source table instead of assuming they all share one. Also
+        # drop edges whose "source" is the gold table itself: the SCD2
+        # macro's own current_active/current_snapshot self-join reads the
+        # gold table's own prior versions, which sqllineage reports as a
+        # source - real, but a self-loop edge in OpenMetadata's lineage
+        # graph adds no information and only looks like a mistake.
+        edges_by_source_table: dict[str, list[ColumnEdge]] = {}
+        for e in stage_to_gold:
+            normalized = _normalize_schema_table(e.source.table)
+            if normalized == gold_table_normalized:
+                continue
+            if "." not in normalized:
+                # Not a real "schema.table" at all - some column (e.g.
+                # effective_datetime from current_timestamp, or an
+                # intermediate value sqllineage couldn't resolve past an
+                # internal macro CTE name) has no genuine upstream table,
+                # so there's nothing to push as a cross-table OM edge.
+                continue
+            # Key by the NORMALIZED name - sqllineage can report the SAME
+            # physical table two different ways (2-part env_var-style vs.
+            # 3-part fully-qualified source()) across different columns of
+            # the same model, which must still collapse into one edge.
+            edges_by_source_table.setdefault(normalized, []).append(e)
+
+        for source_table, table_edges in edges_by_source_table.items():
             _push_hop(
                 connection_params, spec.lineage.namespace, spec.lineage.job_name, "gold",
-                stage_table, gold_table, stage_to_gold,
+                source_table, gold_table, table_edges,
             )
 
 
