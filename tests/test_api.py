@@ -304,6 +304,37 @@ def test_quarantine_resubmit_accepts_valid_correction(pg_connector, test_schema,
     assert not record_path.exists()
 
 
+def test_stop_after_gold_override_without_a_gold_block_returns_a_clean_400(pg_connector, test_schema, tmp_path):
+    # A spec with no gold: block (e.g. fx_rates_ingest, whose gold layer is
+    # a separate gold_builds/*.yaml) used to crash deep inside
+    # run_pipeline() with 'NoneType' object has no attribute 'schema_' if a
+    # caller passed stop_after="gold" as a per-request override - the
+    # spec's own _stop_after_gold_requires_gold_block validator only checks
+    # the spec's OWN default, not a request-time override.
+    data = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+    data["raw"]["schema"] = test_schema
+    data["stage"]["schema"] = test_schema
+    data["monitoring"]["schema"] = test_schema
+    data["execution"]["stop_after"] = "stage"
+    del data["gold"]
+    specs_dir = tmp_path / "specs"
+    specs_dir.mkdir()
+    (specs_dir / "holdings_ingest.yaml").write_text(yaml.dump(data), encoding="utf-8")
+
+    app = create_app(specs_dir=specs_dir, api_key="test-key", connector_factory=_test_connector_factory)
+    file_path = _sample_file(tmp_path)
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/pipelines/holdings_ingest/run",
+            json={"file_path": str(file_path), "stop_after": "gold"},
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 400
+    assert "no gold" in resp.json()["detail"]
+
+
 def test_quarantine_ui_page_renders_without_api_key(tmp_path):
     specs_dir = tmp_path / "specs"
     specs_dir.mkdir()

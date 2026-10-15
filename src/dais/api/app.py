@@ -84,6 +84,18 @@ def create_app(
     ) -> RunResponse | RunBatchResponse:
         spec = load_spec_or_404(spec_name)
 
+        # Mirrors PipelineSpec's own _stop_after_gold_requires_gold_block
+        # validator, which only checks the spec's OWN default - a per-request
+        # override here bypassed it entirely, crashing deep inside
+        # run_pipeline() with an AttributeError on spec.gold.schema_ instead
+        # of a clear 400 at the point the bad request was actually made.
+        if req.stop_after == "gold" and spec.gold is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"stop_after='gold' requested but {spec_name!r} has no gold: block "
+                "(its gold layer, if any, is a separate gold_builds/*.yaml) - use 'stage' or omit stop_after",
+            )
+
         def dispatch_one(file_path: str) -> tuple[RunRecord, bool]:
             """Checksum-dedup + registry.create for one file - shared by
             the explicit file_path path and every discovery branch below.

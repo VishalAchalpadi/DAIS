@@ -405,6 +405,11 @@ async function openRunModal(name) {
   }
 
   const multiFile = !!(spec && spec.source && spec.source.location && spec.source.location.multi_file);
+  // A spec with no gold: block (e.g. fx_rates_ingest, whose gold layer is a
+  // separate gold_builds/*.yaml) rejects stop_after="gold" with a 400 (see
+  // app.py's trigger_run) - omit that option entirely rather than letting
+  // someone pick a combination the server will always refuse.
+  const hasGold = !!(spec && spec.gold);
   const root = document.getElementById("modalRoot");
   root.innerHTML = `
     <div class="modal-backdrop" onclick="if (event.target === this) closeRunModal()">
@@ -424,8 +429,9 @@ async function openRunModal(name) {
             <option value="">(use spec default)</option>
             <option value="raw">raw</option>
             <option value="stage">stage</option>
-            <option value="gold">gold</option>
+            ${hasGold ? '<option value="gold">gold</option>' : ""}
           </select>
+          ${!hasGold && !specError ? '<div class="hint">This spec has no gold: block - its gold layer, if any, is a separate gold_builds/*.yaml build triggered independently.</div>' : ""}
         </div>
         <div class="modal-actions">
           <button onclick="closeRunModal()">Cancel</button>
