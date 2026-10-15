@@ -712,3 +712,16 @@ A few things were deliberately scoped down rather than left half-built:
   itself with backoff+jitter; it does not reconnect a dropped database
   connection, so it helps with transient errors (deadlocks, brief network
   blips) but not a connection that needs to be fully re-established.
+
+## Further documentation
+
+| Doc | Covers |
+|---|---|
+| [docs/enterprise-technical-specification.md](docs/enterprise-technical-specification.md) | Functional and non-functional requirements for taking DAIS to enterprise production deployment (security/auth, HA, observability, governance, CI/CD) - a requirements spec, not a description of the current build |
+| [docs/executive-summary.md](docs/executive-summary.md) | Non-technical overview of what DAIS does and why, by capability area |
+| [docs/running-pipelines.md](docs/running-pipelines.md) | How to trigger each pipeline via the API vs. Dagster, including gold builds and watch sensors |
+| [docs/dagster-vs-legacy-architecture.md](docs/dagster-vs-legacy-architecture.md) | Why Dagster sits alongside Control-M, and the two gold-layer trigger mechanisms |
+| [docs/fx-rates-pipeline.md](docs/fx-rates-pipeline.md) | Walkthrough of the FX rates pipeline: file-watch, archive-on-success, reference-table seeding |
+| [docs/testing-the-file-watcher.md](docs/testing-the-file-watcher.md) | Local end-to-end test of the Dagster file-watch sensor and missed-arrival alert |
+| [docs/eks-deployment-handoff.md](docs/eks-deployment-handoff.md) | Infrastructure/deployment runbook for a team standing DAIS up on EKS - verified facts vs. recommendations, called out explicitly |
+| `.claude/skills/author-pipeline-spec/SKILL.md` | Guided workflow for authoring a new pipeline spec |

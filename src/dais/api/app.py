@@ -28,6 +28,7 @@ from dais.api.models import (
     RunResponse,
     RunStatusResponse,
 )
+from dais.api.pipeline_dashboard_ui import PIPELINE_DASHBOARD_HTML
 from dais.api.quarantine_overview_ui import QUARANTINE_OVERVIEW_HTML
 from dais.api.quarantine_ui import QUARANTINE_UI_HTML
 from dais.api.runs import RunRecord, RunRegistry
@@ -299,6 +300,10 @@ def create_app(
             layer_reached=outcome.layer_reached,
             gold_error=outcome.gold_error,
         )
+
+    @app.get("/ui/dashboard", response_class=HTMLResponse, include_in_schema=False)
+    def pipeline_dashboard_ui() -> str:
+        return PIPELINE_DASHBOARD_HTML
 
     @app.get("/ui/quarantine", response_class=HTMLResponse, include_in_schema=False)
     def quarantine_overview_ui() -> str:

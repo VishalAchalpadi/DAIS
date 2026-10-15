@@ -314,3 +314,21 @@ def test_quarantine_ui_page_renders_without_api_key(tmp_path):
 
     assert resp.status_code == 200
     assert "holdings_ingest" in resp.text
+
+
+def test_pipeline_dashboard_ui_page_renders_without_api_key(tmp_path):
+    # The page itself carries no API key dependency (same as every other
+    # /ui/* page) - the key is entered client-side and sent with each of
+    # the page's own fetch() calls against the already-authenticated
+    # /pipelines/* JSON endpoints.
+    specs_dir = tmp_path / "specs"
+    specs_dir.mkdir()
+    app = create_app(specs_dir=specs_dir, api_key="test-key")
+
+    with TestClient(app) as client:
+        resp = client.get("/ui/dashboard")
+
+    assert resp.status_code == 200
+    assert "DAIS pipeline dashboard" in resp.text
+    assert 'id="pipelineList"' in resp.text
+    assert 'id="tabCatalog"' in resp.text  # embedded OpenMetadata tab
